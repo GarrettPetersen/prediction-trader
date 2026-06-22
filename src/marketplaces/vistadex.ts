@@ -1,0 +1,131 @@
+import { readFileSync } from "node:fs";
+import type { AppConfig } from "../config.js";
+import type { TradeExecution, TradePreview, VistadexTradeTicket } from "../types.js";
+
+type VistadexModule = typeof import("vistadex");
+
+async function loadVistadex() {
+  return await import("vistadex") as VistadexModule & Record<string, unknown>;
+}
+
+async function createVistadexClient(config: AppConfig) {
+  if (!config.vistadex.apiKey) {
+    throw new Error("VISTADEX_CLIENT_API_KEY is required.");
+  }
+
+  const mod = await loadVistadex();
+  const VistadexClient = mod.VistadexClient as any;
+
+  return {
+    client: new VistadexClient({
+      apiKey: config.vistadex.apiKey,
+      rpcUrl: config.vistadex.rpcUrl,
+      positionsBaseUrl: config.vistadex.positionsBaseUrl
+    }),
+    mod
+  };
+}
+
+function readSecretKey(config: AppConfig): string {
+  if (config.vistadex.secretKey) return config.vistadex.secretKey;
+  if (config.vistadex.keypairPath) return readFileSync(config.vistadex.keypairPath, "utf8");
+  throw new Error("VISTADEX_SECRET_KEY or VISTADEX_KEYPAIR_PATH is required.");
+}
+
+async function loadWallet(config: AppConfig) {
+  const mod = await loadVistadex();
+  const keypairFromSecretKey = mod.keypairFromSecretKey as any;
+  return keypairFromSecretKey(readSecretKey(config));
+}
+
+export function previewVistadexTrade(ticket: VistadexTradeTicket): TradePreview {
+  const notionalUsd = ticket.amountUsd ?? 0;
+  const sizeDescription = ticket.amountUsd
+    ? `$${ticket.amountUsd.toFixed(2)}`
+    : `${ticket.shares} shares`;
+
+  return {
+    venue: "vistadex",
+    summary: `${ticket.side.toUpperCase()} ${sizeDescription} on condition ${ticket.conditionId}, outcome ${ticket.outcomeIndex}`,
+    notionalUsd,
+    details: {
+      ...ticket,
+      collateralMint: ticket.collateralMint ?? "USDC_MINT"
+    }
+  };
+}
+
+export async function getVistadexEvent(config: AppConfig, slug: string): Promise<unknown> {
+  const { client } = await createVistadexClient(config);
+  return client.getEvent(slug);
+}
+
+export async function quoteVistadexTrade(
+  config: AppConfig,
+  ticket: VistadexTradeTicket
+): Promise<unknown> {
+  const { client, mod } = await createVistadexClient(config);
+  const wallet = await loadWallet(config);
+  const collateralMint = ticket.collateralMint ?? (mod as any).USDC_MINT;
+
+  return client.quote({
+    walletAddress: wallet.publicKey.toBase58(),
+    conditionId: ticket.conditionId,
+    collateralMint,
+      outcomeIndex: ticket.outcomeIndex,
+      side: ticket.side,
+      quoteBasis: ticket.side === "buy" ? "usd" : "shares",
+      usdAmount: ticket.side === "buy" ? ticket.amountUsd : undefined,
+      shareAmount: ticket.side === "sell" ? ticket.shares : undefined,
+      orderType: ticket.limitPrice === undefined ? "market" : "limit",
+      limitPrice: ticket.limitPrice
+    });
+}
+
+export async function executeVistadexTrade(
+  config: AppConfig,
+  ticket: VistadexTradeTicket
+): Promise<TradeExecution> {
+  const { client, mod } = await createVistadexClient(config);
+  const wallet = await loadWallet(config);
+  const collateralMint = ticket.collateralMint ?? (mod as any).USDC_MINT;
+
+  if (!collateralMint) {
+    throw new Error("Vistadex USDC_MINT export was not found; pass --collateral-mint explicitly.");
+  }
+
+  let response: unknown;
+  if (ticket.side === "buy") {
+    if (ticket.amountUsd === undefined) {
+      throw new Error("Vistadex buy requires amountUsd.");
+    }
+    response = await client.buy({
+      wallet,
+      conditionId: ticket.conditionId,
+      collateralMint,
+      outcomeIndex: ticket.outcomeIndex,
+      usdAmount: ticket.amountUsd,
+      orderType: ticket.limitPrice === undefined ? "market" : "limit",
+      limitPrice: ticket.limitPrice
+    });
+  } else {
+    if (ticket.shares === undefined) {
+      throw new Error("Vistadex sell requires shares.");
+    }
+    response = await client.sell({
+      wallet,
+      conditionId: ticket.conditionId,
+      collateralMint,
+      outcomeIndex: ticket.outcomeIndex,
+      shareAmount: ticket.shares,
+      orderType: ticket.limitPrice === undefined ? "market" : "limit",
+      limitPrice: ticket.limitPrice
+    });
+  }
+
+  return {
+    venue: "vistadex",
+    status: "submitted",
+    details: response as Record<string, unknown>
+  };
+}

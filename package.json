@@ -1,0 +1,37 @@
+{
+  "name": "prediction-trader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless tooling for small prediction-market trading experiments.",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "cli": "node --import tsx src/cli.ts",
+    "polymarket:order": "node --import tsx src/cli.ts polymarket:order",
+    "vistadex:event": "node --import tsx src/cli.ts vistadex:event",
+    "vistadex:quote": "node --import tsx src/cli.ts vistadex:quote",
+    "vistadex:trade": "node --import tsx src/cli.ts vistadex:trade"
+  },
+  "dependencies": {
+    "@polymarket/clob-client-v2": "^1.0.6",
+    "dotenv": "^17.4.2",
+    "viem": "^2.53.1",
+    "vistadex": "^0.4.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "jayson": {
+      "uuid": "^11.1.1"
+    },
+    "ws": "^8.21.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
