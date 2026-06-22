@@ -5,6 +5,23 @@ import type { PolymarketOrderTicket, TradeExecution, TradePreview } from "../typ
 
 type ClobModule = typeof import("@polymarket/clob-client-v2");
 
+export function getPolymarketExecutionStatus(response: any): TradeExecution["status"] {
+  if (
+    response?.success === false ||
+    response?.error ||
+    (typeof response?.status === "number" && response.status >= 400)
+  ) {
+    return "failed";
+  }
+
+  const status = typeof response?.status === "string" ? response.status.toLowerCase() : "";
+  if (status === "matched" || status === "filled") {
+    return "filled";
+  }
+
+  return "submitted";
+}
+
 function requirePolymarketPrivateKey(config: AppConfig): Hex {
   const privateKey = config.polymarket.privateKey;
   if (!privateKey) {
@@ -100,7 +117,7 @@ export async function executePolymarketOrder(
     const response = await client.postOrder(signedOrder, orderType);
     return {
       venue: "polymarket",
-      status: response?.success === false ? "failed" : "submitted",
+      status: getPolymarketExecutionStatus(response),
       details: response
     };
   }
@@ -122,7 +139,7 @@ export async function executePolymarketOrder(
 
   return {
     venue: "polymarket",
-    status: response?.success === false ? "failed" : "submitted",
+    status: getPolymarketExecutionStatus(response),
     details: response
   };
 }
