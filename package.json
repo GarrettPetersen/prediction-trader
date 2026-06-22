@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "check:env": "node --import tsx src/check-env.ts",
     "cli": "node --import tsx src/cli.ts",
     "polymarket:order": "node --import tsx src/cli.ts polymarket:order",
     "vistadex:event": "node --import tsx src/cli.ts vistadex:event",
@@ -15,6 +16,7 @@
   },
   "dependencies": {
     "@polymarket/clob-client-v2": "^1.0.6",
+    "bs58": "^4.0.1",
     "dotenv": "^17.4.2",
     "viem": "^2.53.1",
     "vistadex": "^0.4.0",

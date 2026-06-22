@@ -74,7 +74,7 @@ POLYMARKET_CHAIN_ID=137
 POLYMARKET_PRIVATE_KEY=0x...
 POLYMARKET_SIGNATURE_TYPE=3
 POLYMARKET_FUNDER_ADDRESS=0x...
-POLYGON_RPC_URL=
+POLYGON_RPC_URL=https://polygon-bor-rpc.publicnode.com
 ```
 
 Optional Polymarket API credentials:
@@ -116,7 +116,137 @@ Run checks:
 ```bash
 npm run build
 npm test
+npm run check:env
 ```
+
+Run optional network checks after credentials are filled:
+
+```bash
+npm run check:env -- --network
+```
+
+The env checker prints public wallet addresses and readiness flags, but never
+prints private keys or API secrets. In network mode it also checks Polymarket
+geoblocking, the Polymarket deposit wallet contract code, Polymarket CLOB
+collateral balance/allowances, and Vistadex USDC balance when a Vistadex client
+API key is configured.
+
+## Credential Setup
+
+### Polymarket
+
+Use the Polymarket-created wallet private key for API signing:
+
+```bash
+POLYMARKET_PRIVATE_KEY=0x...
+```
+
+The public address derived from that private key does not need a separate env
+var. If the Polymarket profile page shows an address labeled "Do not send funds
+to this address. For API use only", treat that as the signer/public address and
+do not use it as the funder.
+
+Use the EVM/Polygon address from Polymarket's Deposit flow as the funder:
+
+```bash
+POLYMARKET_FUNDER_ADDRESS=0x...
+POLYMARKET_SIGNATURE_TYPE=3
+```
+
+For new deposit-wallet accounts, the signer address and funder address are
+expected to be different. The funder should be the smart wallet holding pUSD and
+positions. The env checker can verify that shape locally, and `--network` can
+also confirm the funder has contract code on Polygon.
+
+If Polymarket shows "Upgrade your account" or asks you to migrate to a new
+wallet, deploy the new deposit wallet and transfer funds in the Polymarket UI
+first. Then update `POLYMARKET_FUNDER_ADDRESS` to the new Polygon/EVM deposit
+wallet address. The old deposit address may still be a valid contract while
+showing zero CLOB buying power.
+
+Before live trading, `npm run check:env -- --network` should show non-zero
+`network.polymarketCollateral.balance` and non-zero allowances. If the signer
+and funder validate but Polymarket collateral is `0`, the account can sign API
+requests but does not yet have CLOB buying power. Polymarket's deposit-wallet
+docs say pUSD must be held by the deposit wallet, approvals must come from the
+deposit wallet, and the CLOB balance/allowance sync must be run after funding or
+approval changes.
+
+Optional CLOB API credentials can stay blank at first:
+
+```bash
+POLYMARKET_API_KEY=
+POLYMARKET_API_SECRET=
+POLYMARKET_API_PASSPHRASE=
+```
+
+When these are blank, the adapter asks the Polymarket SDK to derive/create API
+credentials from the signing key.
+
+### Vistadex
+
+Vistadex has two separate credentials in the current SDK model:
+
+- a Solana wallet private key, which a normal Vistadex user can export from the
+  account UI and use to sign transactions
+- a `VISTADEX_CLIENT_API_KEY`, which authorizes access to the RFQ server
+
+As of this repo's initial setup, the second item does not appear to be a
+self-serve end-user credential. The public `vistadex` npm package requires it,
+but the local Vistadex server docs describe client keys as Unkey keys created
+under the internal `vistadex-clients` API. That means a normal Vistadex user
+should not be expected to create an Unkey account or know about Unkey.
+
+If Vistadex wants ordinary users and their agents to trade through the SDK, the
+product likely needs one of these user-facing flows:
+
+- a Developer/API Keys page in Vistadex account settings that issues scoped
+  personal client keys
+- wallet-authenticated RFQ access, where the SDK proves wallet ownership instead
+  of requiring a separate server API key
+- a documented support/request flow for client API keys
+
+If you do have a user-facing client API key, store it locally:
+
+```bash
+VISTADEX_CLIENT_API_KEY=...
+```
+
+Do not use a `vistadex-fillers` key; filler keys are scoped to market-maker
+endpoints and will not pass client endpoint auth.
+
+The SDK sends this key as `Authorization: Bearer <key>` to
+`https://server.vistadex.com` and uses it as the `apiKey` query parameter for
+user websocket updates.
+
+Then create a dedicated Solana hot wallet for the agent:
+
+```bash
+mkdir -p wallets
+node --input-type=module -e "import { createWallet } from 'vistadex'; import { writeFileSync, chmodSync } from 'node:fs'; const path = 'wallets/vistadex-agent.keypair.json'; const wallet = createWallet(); writeFileSync(path, JSON.stringify(Array.from(wallet.secretKey)), { mode: 0o600 }); chmodSync(path, 0o600); console.log(wallet.publicKey.toBase58());"
+```
+
+Set the keypair path in `.env`:
+
+```bash
+VISTADEX_KEYPAIR_PATH=wallets/vistadex-agent.keypair.json
+```
+
+Or use an exported Vistadex/Solana private key directly:
+
+```bash
+VISTADEX_SECRET_KEY=...
+```
+
+`VISTADEX_SECRET_KEY` accepts the base58 private-key export used by many Solana
+wallets, the Vistadex SDK's base64 format, or a JSON array string. It takes
+priority over `VISTADEX_KEYPAIR_PATH`. The public key does not need to go in
+`.env`; `npm run check:env` derives it from the private key so you can compare
+it to the public address shown in the Vistadex account UI.
+
+Fund the printed Solana public key with the small Vistadex budget you want the
+agent to control. Keep enough SOL for transaction fees and enough USDC for buy
+orders. The keypair JSON is wallet material; keep it local and do not commit it.
 
 ## Polymarket Usage
 

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import type { AppConfig } from "../config.js";
 import type { TradeExecution, TradePreview, VistadexTradeTicket } from "../types.js";
+import { keypairFromVistadexSecret } from "../vistadexWallet.js";
 
 type VistadexModule = typeof import("vistadex");
 
@@ -33,9 +34,7 @@ function readSecretKey(config: AppConfig): string {
 }
 
 async function loadWallet(config: AppConfig) {
-  const mod = await loadVistadex();
-  const keypairFromSecretKey = mod.keypairFromSecretKey as any;
-  return keypairFromSecretKey(readSecretKey(config));
+  return keypairFromVistadexSecret(readSecretKey(config));
 }
 
 export function previewVistadexTrade(ticket: VistadexTradeTicket): TradePreview {

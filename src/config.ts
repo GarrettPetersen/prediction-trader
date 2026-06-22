@@ -2,25 +2,31 @@ import "dotenv/config";
 import { z } from "zod";
 import { LIVE_TRADING_ENV_VALUE } from "./safety.js";
 
+const emptyToUndefined = (value: unknown) => value === "" ? undefined : value;
+const optionalString = z.preprocess(emptyToUndefined, z.string().optional());
+const optionalUrl = z.preprocess(emptyToUndefined, z.string().url().optional());
+const defaultUrl = (url: string) =>
+  z.preprocess(emptyToUndefined, z.string().url().default(url));
+
 const envSchema = z.object({
   PREDICTION_TRADER_LIVE: z.string().default("0"),
   PREDICTION_TRADER_MAX_USD: z.coerce.number().positive().default(5),
 
-  POLYMARKET_HOST: z.string().url().default("https://clob.polymarket.com"),
+  POLYMARKET_HOST: defaultUrl("https://clob.polymarket.com"),
   POLYMARKET_CHAIN_ID: z.coerce.number().int().positive().default(137),
-  POLYMARKET_PRIVATE_KEY: z.string().optional(),
+  POLYMARKET_PRIVATE_KEY: optionalString,
   POLYMARKET_SIGNATURE_TYPE: z.coerce.number().int().min(0).max(3).default(3),
-  POLYMARKET_FUNDER_ADDRESS: z.string().optional(),
-  POLYMARKET_API_KEY: z.string().optional(),
-  POLYMARKET_API_SECRET: z.string().optional(),
-  POLYMARKET_API_PASSPHRASE: z.string().optional(),
-  POLYGON_RPC_URL: z.string().url().optional(),
+  POLYMARKET_FUNDER_ADDRESS: optionalString,
+  POLYMARKET_API_KEY: optionalString,
+  POLYMARKET_API_SECRET: optionalString,
+  POLYMARKET_API_PASSPHRASE: optionalString,
+  POLYGON_RPC_URL: defaultUrl("https://polygon-bor-rpc.publicnode.com"),
 
-  VISTADEX_CLIENT_API_KEY: z.string().optional(),
-  VISTADEX_RPC_URL: z.string().url().default("https://api.mainnet-beta.solana.com"),
-  VISTADEX_POSITIONS_API_URL: z.string().url().default("https://markets.vistadex.com"),
-  VISTADEX_SECRET_KEY: z.string().optional(),
-  VISTADEX_KEYPAIR_PATH: z.string().optional()
+  VISTADEX_CLIENT_API_KEY: optionalString,
+  VISTADEX_RPC_URL: defaultUrl("https://api.mainnet-beta.solana.com"),
+  VISTADEX_POSITIONS_API_URL: defaultUrl("https://markets.vistadex.com"),
+  VISTADEX_SECRET_KEY: optionalString,
+  VISTADEX_KEYPAIR_PATH: optionalString
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;
