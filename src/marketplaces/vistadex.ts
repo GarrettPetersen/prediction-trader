@@ -4,6 +4,12 @@ import type { TradeExecution, TradePreview, VistadexTradeTicket } from "../types
 import { keypairFromVistadexSecret } from "../vistadexWallet.js";
 
 type VistadexModule = typeof import("vistadex");
+const NON_ZERO_POSITION_EPSILON = 0.000001;
+
+export interface VistadexPositionsOptions {
+  includeZero?: boolean;
+  limit?: number;
+}
 
 async function loadVistadex() {
   return await import("vistadex") as VistadexModule & Record<string, unknown>;
@@ -57,6 +63,44 @@ export function previewVistadexTrade(ticket: VistadexTradeTicket): TradePreview 
 export async function getVistadexEvent(config: AppConfig, slug: string): Promise<unknown> {
   const { client } = await createVistadexClient(config);
   return client.getEvent(slug);
+}
+
+export async function getVistadexPositions(
+  config: AppConfig,
+  options: VistadexPositionsOptions = {}
+): Promise<unknown> {
+  const { client } = await createVistadexClient(config);
+  const wallet = await loadWallet(config);
+  const limit = Math.min(Math.max(Math.trunc(options.limit ?? 200), 1), 200);
+  const page = await client.getPositions({
+    walletAddress: wallet.publicKey.toBase58(),
+    limit
+  });
+  const positions = Array.isArray(page.positions) ? page.positions : [];
+  const normalized = positions
+    .map((position: Record<string, any>) => ({
+      slug: position.metadata?.slug,
+      conditionId: position.conditionId ?? position.condition_id,
+      outcomeIndex: position.outcomeIndex ?? position.outcome_index,
+      balance: position.balance,
+      balanceRaw: position.balanceRaw ?? position.balance_raw,
+      price: position.price,
+      payout: position.payout,
+      status: position.status,
+      closed: position.metadata?.closed
+    }))
+    .filter((position: { balance?: string }) =>
+      options.includeZero ? true : Number(position.balance ?? 0) > NON_ZERO_POSITION_EPSILON
+    );
+
+  return {
+    walletAddress: wallet.publicKey.toBase58(),
+    total: page.total,
+    hasMore: page.hasMore,
+    nextCursor: page.nextCursor,
+    count: normalized.length,
+    positions: normalized
+  };
 }
 
 export async function quoteVistadexTrade(

@@ -1,17 +1,29 @@
 import { inspect } from "node:util";
 import { loadConfig } from "./config.js";
-import { assertCanExecute } from "./safety.js";
+import { assertCanExecute, assertLiveMutation } from "./safety.js";
 import {
   executePolymarketOrder,
+  executePolymarketRedeem,
+  previewPolymarketRedeem,
   previewPolymarketOrder
 } from "./marketplaces/polymarket.js";
 import {
+  getPolymarketEvent,
+  getPolymarketPositions
+} from "./marketplaces/polymarketData.js";
+import {
   executeVistadexTrade,
   getVistadexEvent,
+  getVistadexPositions,
   previewVistadexTrade,
   quoteVistadexTrade
 } from "./marketplaces/vistadex.js";
-import type { PolymarketOrderTicket, TradeSide, VistadexTradeTicket } from "./types.js";
+import type {
+  PolymarketOrderTicket,
+  PolymarketRedeemTicket,
+  TradeSide,
+  VistadexTradeTicket
+} from "./types.js";
 
 type Args = Record<string, string | boolean>;
 const POLYMARKET_ORDER_TYPES = new Set(["GTC", "GTD", "FOK", "FAK"]);
@@ -92,6 +104,13 @@ function validatePolymarketTicket(ticket: PolymarketOrderTicket): void {
   }
 }
 
+function validatePolymarketRedeemTicket(ticket: PolymarketRedeemTicket): void {
+  const targets = [ticket.conditionId, ticket.marketId, ticket.positionId].filter(Boolean);
+  if (targets.length !== 1) {
+    throw new Error("Pass exactly one of --condition-id, --market-id, or --position-id.");
+  }
+}
+
 function validateVistadexTicket(ticket: VistadexTradeTicket): void {
   if (ticket.side === "buy" && ticket.amountUsd === undefined) {
     throw new Error("Vistadex buys require --amount-usd.");
@@ -109,8 +128,12 @@ function usage(): void {
   console.log(`Prediction Trader
 
 Commands:
+  polymarket:positions [--redeemable] [--include-zero] [--limit N]
+  polymarket:event --slug SLUG [--orderbook]
   polymarket:order --side buy|sell --token-id ID --price N (--amount-usd N | --shares N) [--order-type FOK|FAK|GTC|GTD] [--execute]
+  polymarket:redeem (--condition-id HEX | --market-id ID | --position-id ID) [--execute]
   vistadex:event --slug SLUG
+  vistadex:positions [--include-zero] [--limit N]
   vistadex:quote --side buy|sell --condition-id HEX --outcome-index 0|1 (--amount-usd N | --shares N) [--limit-price N]
   vistadex:trade --side buy|sell --condition-id HEX --outcome-index 0|1 (--amount-usd N | --shares N) [--limit-price N] [--execute]
 
@@ -130,6 +153,22 @@ async function run(): Promise<void> {
 
   if (command === "help" || command === "--help" || command === "-h") {
     usage();
+    return;
+  }
+
+  if (command === "polymarket:positions") {
+    print(await getPolymarketPositions(config, {
+      includeZero: args["include-zero"] === true,
+      limit: numberArg(args, "limit", false),
+      redeemableOnly: args.redeemable === true
+    }));
+    return;
+  }
+
+  if (command === "polymarket:event") {
+    print(await getPolymarketEvent(config, requiredStringArg(args, "slug"), {
+      includeOrderbook: args.orderbook === true
+    }));
     return;
   }
 
@@ -157,8 +196,33 @@ async function run(): Promise<void> {
     return;
   }
 
+  if (command === "polymarket:redeem") {
+    const ticket: PolymarketRedeemTicket = {
+      venue: "polymarket",
+      conditionId: stringArg(args, "condition-id", false),
+      marketId: stringArg(args, "market-id", false),
+      positionId: stringArg(args, "position-id", false)
+    };
+    validatePolymarketRedeemTicket(ticket);
+
+    print({ execute, preview: previewPolymarketRedeem(ticket), safety });
+    if (!execute) return;
+
+    assertLiveMutation(safety, execute);
+    print(await executePolymarketRedeem(config, ticket));
+    return;
+  }
+
   if (command === "vistadex:event") {
     print(await getVistadexEvent(config, requiredStringArg(args, "slug")));
+    return;
+  }
+
+  if (command === "vistadex:positions") {
+    print(await getVistadexPositions(config, {
+      includeZero: args["include-zero"] === true,
+      limit: numberArg(args, "limit", false)
+    }));
     return;
   }
 

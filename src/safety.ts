@@ -36,3 +36,13 @@ export function assertCanExecute(ticket: TradeTicket, limits: SafetyLimits, exec
     );
   }
 }
+
+export function assertLiveMutation(limits: SafetyLimits, execute: boolean): void {
+  if (!execute) {
+    throw new Error("Refusing to execute without --execute.");
+  }
+
+  if (!limits.liveEnabled) {
+    throw new Error("Refusing to execute unless PREDICTION_TRADER_LIVE=1.");
+  }
+}

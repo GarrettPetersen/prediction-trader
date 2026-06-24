@@ -11,6 +11,8 @@ live execution difficult to trigger by accident.
 
 - Builds dry-run trade previews for Polymarket and Vistadex.
 - Places Polymarket CLOB orders through `@polymarket/clob-client-v2`.
+- Redeems resolved Polymarket positions through the official
+  `@polymarket/client` SDK gasless workflow.
 - Requests and submits Vistadex RFQ trades through the public `vistadex` SDK.
 - Requires explicit live-trading gates before any command can submit a trade.
 - Keeps wallet keys and API credentials out of source control.
@@ -41,7 +43,9 @@ recommended operating pattern is:
 
 ## Prerequisites
 
-- Node.js 20 or newer.
+- Node.js 20 or newer for the original order/RFQ tooling. Node.js 24 or newer
+  is recommended for `polymarket:redeem` because the newer
+  `@polymarket/client` beta package declares that engine requirement.
 - A funded Polymarket wallet/account if you want Polymarket execution.
 - A funded Vistadex Solana wallet and Vistadex client API key if you want
   Vistadex execution.
@@ -250,8 +254,23 @@ orders. The keypair JSON is wallet material; keep it local and do not commit it.
 
 ## Polymarket Usage
 
-Polymarket commands currently require a known outcome `token-id`. Market
-discovery is not implemented in this repo yet.
+List current positions and redeemable rows:
+
+```bash
+npm run polymarket:positions
+npm run polymarket:positions -- --redeemable
+```
+
+Fetch a Polymarket event by slug. Add `--orderbook` when you want best bid/ask
+for each outcome token before deciding whether to trade or exit:
+
+```bash
+npm run polymarket:event -- --slug fifwc-col-cdr-2026-06-23
+npm run polymarket:event -- --slug fifwc-col-cdr-2026-06-23 --orderbook
+```
+
+Order commands require a known outcome `token-id`. Use `polymarket:event
+--orderbook`, the Polymarket UI, or another market-data feed to get token IDs.
 
 Preview a market buy without submitting:
 
@@ -294,12 +313,42 @@ Sizing rules:
 - Limit orders (`GTC` or `GTD`) use `--shares`.
 - `--price` is the limit or worst acceptable price.
 
+Redeem resolved winnings:
+
+```bash
+npm run polymarket:redeem -- \
+  --condition-id CONDITION_ID
+```
+
+Submit only after reviewing the preview:
+
+```bash
+PREDICTION_TRADER_LIVE=1 npm run polymarket:redeem -- \
+  --execute \
+  --condition-id CONDITION_ID
+```
+
+You can pass `--market-id` instead of `--condition-id` if you have the numeric
+Polymarket market ID. For protocol v2 combo positions, pass `--position-id`.
+Redemption is not capped by `PREDICTION_TRADER_MAX_USD` because it claims
+resolved collateral rather than opening new risk, but it still requires both
+`--execute` and `PREDICTION_TRADER_LIVE=1`. For deposit-wallet accounts, the
+command creates a temporary Polymarket builder API key through the SDK, uses it
+for the gasless relayer call, and attempts to revoke it afterward. The key is
+never printed or written to `.env`.
+
 ## Vistadex Usage
 
 Fetch a Vistadex event by slug:
 
 ```bash
 npm run vistadex:event -- --slug EVENT_SLUG
+```
+
+List current Vistadex positions:
+
+```bash
+npm run vistadex:positions
 ```
 
 Request a quote without signing or submitting:
@@ -384,8 +433,10 @@ PREDICTION_TRADER_LIVE=1 npm run vistadex:trade -- \
 ## Current Limitations
 
 - No strategy loop yet.
-- No Polymarket market discovery yet; pass token IDs manually.
-- No portfolio reconciliation or daily-loss accounting yet.
+- Polymarket event lookup can fetch outcome token IDs and orderbook tops by
+  slug, but there is no broad market screener yet.
+- Position snapshots exist, but there is no portfolio reconciliation or
+  daily-loss accounting yet.
 - No persistent trade ledger yet.
 - No automatic position exit rules yet.
 - Vistadex quote/trade commands require a funded Solana wallet and a client API
@@ -394,14 +445,22 @@ PREDICTION_TRADER_LIVE=1 npm run vistadex:trade -- \
 ## Dependency Notes
 
 `package.json` includes npm overrides for patched `ws` and `uuid` transitive
-dependencies. `npm audit --omit=dev` may still report low-severity advisories
-through Polymarket's SDK dependency on Ethers v5/`elliptic`; npm currently
-reports no non-breaking fix for that chain.
+dependencies. `@polymarket/client@0.1.0-beta.4` currently declares
+`node >=24`; it installed and imported on local Node `v23.7.0`, but Node 24 is
+the safer runtime for redemption work. `npm audit --omit=dev` may still report
+low-severity advisories through Polymarket's SDK dependency on Ethers
+v5/`elliptic`; npm currently reports no non-breaking fix for that chain.
 
 ## Research Notes
 
 - Polymarket official docs recommend the TypeScript CLOB v2 client for order
   creation: `@polymarket/clob-client-v2` with `viem`.
+- Resolved Polymarket positions are not redeemed through the CLOB client. The
+  official `@polymarket/client` package exposes `client.redeemPositions(...)`,
+  but the current beta helper did not find our closed Croatia market without
+  `closed=true`. This repo resolves closed market metadata from Gamma, then uses
+  official SDK pieces: `ctfRedeemPositionsCall(...)` plus
+  `prepareGaslessTransaction(...)`.
 - Polymarket orders need L1 wallet signing plus L2 API credentials; new API
   users generally use deposit wallets with signature type `3`.
 - Vistadex exposes a public npm SDK, `vistadex@0.4.0`, which is easier than
@@ -415,4 +474,5 @@ Useful source links:
 - [Polymarket trading quickstart](https://docs.polymarket.com/trading/quickstart)
 - [Polymarket create order docs](https://docs.polymarket.com/trading/orders/create)
 - [Polymarket TypeScript SDK docs](https://docs.polymarket.com/dev-tooling/typescript)
+- [Polymarket client npm package](https://www.npmjs.com/package/@polymarket/client)
 - [Vistadex npm package](https://www.npmjs.com/package/vistadex)

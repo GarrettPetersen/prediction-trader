@@ -19,6 +19,13 @@ export interface PolymarketOrderTicket {
   postOnly?: boolean;
 }
 
+export interface PolymarketRedeemTicket {
+  venue: "polymarket";
+  conditionId?: string;
+  marketId?: string;
+  positionId?: string;
+}
+
 export interface VistadexTradeTicket {
   venue: "vistadex";
   side: TradeSide;
