@@ -6,6 +6,36 @@ import { keypairFromVistadexSecret } from "../vistadexWallet.js";
 type VistadexModule = typeof import("vistadex");
 const NON_ZERO_POSITION_EPSILON = 0.000001;
 
+export interface VistadexPositionPrice {
+  midpoint: number;
+  bestBid: number;
+  bestAsk: number;
+}
+
+export interface VistadexPosition {
+  slug?: string;
+  question?: string;
+  outcomes: string[];
+  conditionId?: string;
+  outcomeIndex: number;
+  collateralMint?: string;
+  balance: string;
+  balanceRaw?: string;
+  price?: VistadexPositionPrice;
+  payout?: number;
+  status?: string;
+  closed?: boolean;
+}
+
+export interface VistadexPositionsSnapshot {
+  walletAddress: string;
+  total: number;
+  hasMore: boolean;
+  nextCursor?: string | null;
+  count: number;
+  positions: VistadexPosition[];
+}
+
 export interface VistadexPositionsOptions {
   includeZero?: boolean;
   limit?: number;
@@ -43,6 +73,56 @@ async function loadWallet(config: AppConfig) {
   return keypairFromVistadexSecret(readSecretKey(config));
 }
 
+function numberValue(value: unknown): number {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function normalizePrice(value: unknown): VistadexPositionPrice | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  return {
+    midpoint: numberValue(record.midpoint),
+    bestBid: numberValue(record.best_bid ?? record.bestBid),
+    bestAsk: numberValue(record.best_ask ?? record.bestAsk)
+  };
+}
+
+function normalizeOutcomes(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function sanitizeVistadexQuoteResult(response: any) {
+  return {
+    rfqId: response?.rfqId,
+    walletAddress: response?.walletAddress,
+    auctionDurationMs: response?.auctionDurationMs,
+    auctionEndTime: response?.auctionEndTime,
+    hasQuote: response?.hasQuote === true,
+    quote: response?.quote
+      ? {
+          filler: response.quote.filler,
+          pricePerShare: response.quote.pricePerShare,
+          shares: response.quote.shares,
+          totalUsd: response.quote.totalUsd
+        }
+      : null,
+    summary: response?.summary,
+    feeRateBps: response?.feeRateBps
+  };
+}
+
+function sanitizeVistadexTradeResult(response: any) {
+  return {
+    rfqId: response?.rfqId,
+    side: response?.side,
+    walletAddress: response?.walletAddress,
+    winningQuote: response?.winningQuote,
+    transactionSignature: response?.transactionSignature,
+    feeRateBps: response?.feeRateBps
+  };
+}
+
 export function previewVistadexTrade(ticket: VistadexTradeTicket): TradePreview {
   const notionalUsd = ticket.amountUsd ?? 0;
   const sizeDescription = ticket.amountUsd
@@ -68,7 +148,7 @@ export async function getVistadexEvent(config: AppConfig, slug: string): Promise
 export async function getVistadexPositions(
   config: AppConfig,
   options: VistadexPositionsOptions = {}
-): Promise<unknown> {
+): Promise<VistadexPositionsSnapshot> {
   const { client } = await createVistadexClient(config);
   const wallet = await loadWallet(config);
   const limit = Math.min(Math.max(Math.trunc(options.limit ?? 200), 1), 200);
@@ -80,11 +160,14 @@ export async function getVistadexPositions(
   const normalized = positions
     .map((position: Record<string, any>) => ({
       slug: position.metadata?.slug,
+      question: position.metadata?.question,
+      outcomes: normalizeOutcomes(position.metadata?.outcomes),
       conditionId: position.conditionId ?? position.condition_id,
       outcomeIndex: position.outcomeIndex ?? position.outcome_index,
+      collateralMint: position.collateralMint ?? position.collateral_mint,
       balance: position.balance,
       balanceRaw: position.balanceRaw ?? position.balance_raw,
-      price: position.price,
+      price: normalizePrice(position.price),
       payout: position.payout,
       status: position.status,
       closed: position.metadata?.closed
@@ -111,7 +194,7 @@ export async function quoteVistadexTrade(
   const wallet = await loadWallet(config);
   const collateralMint = ticket.collateralMint ?? (mod as any).USDC_MINT;
 
-  return client.quote({
+  const response = await client.quote({
     walletAddress: wallet.publicKey.toBase58(),
     conditionId: ticket.conditionId,
     collateralMint,
@@ -123,6 +206,7 @@ export async function quoteVistadexTrade(
       orderType: ticket.limitPrice === undefined ? "market" : "limit",
       limitPrice: ticket.limitPrice
     });
+  return sanitizeVistadexQuoteResult(response);
 }
 
 export async function executeVistadexTrade(
@@ -166,9 +250,10 @@ export async function executeVistadexTrade(
     });
   }
 
+  const details = sanitizeVistadexTradeResult(response);
   return {
     venue: "vistadex",
-    status: "submitted",
-    details: response as Record<string, unknown>
+    status: details.transactionSignature ? "filled" : "submitted",
+    details: details as Record<string, unknown>
   };
 }

@@ -18,6 +18,16 @@ import {
   previewVistadexTrade,
   quoteVistadexTrade
 } from "./marketplaces/vistadex.js";
+import {
+  loadFootballEloDataset,
+  lookupFootballTeam,
+  pricePolymarketFootballEvent
+} from "./models/footballElo.js";
+import {
+  buildUnlockTickets,
+  createPortfolioUnlockPlan,
+  type PortfolioUnlockVenueArg
+} from "./portfolioUnlock.js";
 import type {
   PolymarketOrderTicket,
   PolymarketRedeemTicket,
@@ -88,6 +98,14 @@ function polymarketOrderTypeArg(args: Args): PolymarketOrderTicket["orderType"] 
   return orderType as PolymarketOrderTicket["orderType"];
 }
 
+function portfolioUnlockVenueArg(args: Args): PortfolioUnlockVenueArg {
+  const venue = stringArg(args, "venue", false) ?? "all";
+  if (venue !== "all" && venue !== "polymarket" && venue !== "vistadex") {
+    throw new Error("--venue must be all, polymarket, or vistadex.");
+  }
+  return venue;
+}
+
 function validatePolymarketTicket(ticket: PolymarketOrderTicket): void {
   const isMarketType = ticket.orderType === "FOK" || ticket.orderType === "FAK";
   if (ticket.amountUsd !== undefined && ticket.shares !== undefined) {
@@ -136,6 +154,10 @@ Commands:
   vistadex:positions [--include-zero] [--limit N]
   vistadex:quote --side buy|sell --condition-id HEX --outcome-index 0|1 (--amount-usd N | --shares N) [--limit-price N]
   vistadex:trade --side buy|sell --condition-id HEX --outcome-index 0|1 (--amount-usd N | --shares N) [--limit-price N] [--execute]
+  portfolio:unlock [--venue all|polymarket|vistadex] [--min-unlock-usd N] [--max-pairs N] [--execute]
+  football:ratings [--refresh] [--team TEAM] [--limit N]
+  football:price --slug SLUG [--refresh] [--home TEAM --away TEAM] [--edge-threshold N]
+  football:screen --slugs SLUG[,SLUG...] [--refresh] [--edge-threshold N]
 
 Live trading requires --execute and PREDICTION_TRADER_LIVE=1.
 `);
@@ -210,6 +232,147 @@ async function run(): Promise<void> {
 
     assertLiveMutation(safety, execute);
     print(await executePolymarketRedeem(config, ticket));
+    return;
+  }
+
+  if (command === "portfolio:unlock") {
+    const plan = await createPortfolioUnlockPlan(config, {
+      venue: portfolioUnlockVenueArg(args),
+      limit: numberArg(args, "limit", false),
+      maxPairs: numberArg(args, "max-pairs", false),
+      minShares: numberArg(args, "min-shares", false),
+      minUnlockUsd: numberArg(args, "min-unlock-usd", false)
+    });
+    const ticketsByPair = plan.pairs.map((pair) => ({
+      venue: pair.venue,
+      conditionId: pair.conditionId,
+      slug: pair.slug,
+      question: pair.question ?? pair.title,
+      estimatedUnlockUsd: pair.estimatedUnlockUsd,
+      estimatedCostUsd: pair.estimatedCostUsd,
+      tickets: buildUnlockTickets(pair)
+    }));
+
+    print({ execute, safety, plan, ticketsByPair });
+    if (!execute) return;
+
+    const tickets = ticketsByPair.flatMap((pair) => pair.tickets);
+    for (const ticket of tickets) {
+      assertCanExecute(ticket, safety, execute);
+    }
+
+    const executions = [];
+    for (const pair of plan.pairs) {
+      const pairResult = {
+        venue: pair.venue,
+        conditionId: pair.conditionId,
+        question: pair.question ?? pair.title,
+        executions: [] as unknown[]
+      };
+      for (const ticket of buildUnlockTickets(pair)) {
+        const result = ticket.venue === "polymarket"
+          ? await executePolymarketOrder(config, ticket)
+          : await executeVistadexTrade(config, ticket);
+        pairResult.executions.push({ ticket, result });
+        if (result.status === "failed") break;
+      }
+      executions.push(pairResult);
+    }
+    print({ executions });
+    return;
+  }
+
+  if (command === "football:ratings") {
+    const dataset = await loadFootballEloDataset({ refresh: args.refresh === true });
+    const team = stringArg(args, "team", false);
+    if (team) {
+      print({
+        source: dataset.sourceUrls,
+        cache: dataset.cachePaths,
+        team: lookupFootballTeam(dataset, team)
+      });
+      return;
+    }
+
+    print({
+      source: dataset.sourceUrls,
+      cache: dataset.cachePaths,
+      count: dataset.ratings.length,
+      ratings: dataset.ratings.slice(0, Math.trunc(numberArg(args, "limit", false) ?? 25))
+    });
+    return;
+  }
+
+  if (command === "football:price") {
+    print(await pricePolymarketFootballEvent(config, requiredStringArg(args, "slug"), {
+      refresh: args.refresh === true,
+      home: stringArg(args, "home", false),
+      away: stringArg(args, "away", false),
+      edgeThreshold: numberArg(args, "edge-threshold", false),
+      homeAdvantage: numberArg(args, "home-advantage", false),
+      drawBase: numberArg(args, "draw-base", false),
+      drawMin: numberArg(args, "draw-min", false),
+      drawScale: numberArg(args, "draw-scale", false),
+      eloScale: numberArg(args, "elo-scale", false)
+    }));
+    return;
+  }
+
+  if (command === "football:screen") {
+    const slugs = requiredStringArg(args, "slugs")
+      .split(",")
+      .map((slug) => slug.trim())
+      .filter(Boolean);
+    const reports = await Promise.all(
+      slugs.map(async (slug) => {
+        try {
+          return {
+            ok: true as const,
+            report: await pricePolymarketFootballEvent(config, slug, {
+              refresh: args.refresh === true,
+              edgeThreshold: numberArg(args, "edge-threshold", false),
+              homeAdvantage: numberArg(args, "home-advantage", false),
+              drawBase: numberArg(args, "draw-base", false),
+              drawMin: numberArg(args, "draw-min", false),
+              drawScale: numberArg(args, "draw-scale", false),
+              eloScale: numberArg(args, "elo-scale", false)
+            })
+          };
+        } catch (error) {
+          return {
+            ok: false as const,
+            slug,
+            error: error instanceof Error ? error.message : String(error)
+          };
+        }
+      })
+    );
+    print(reports.map((result) => {
+      if (!result.ok) {
+        return {
+          event: { slug: result.slug },
+          error: result.error
+        };
+      }
+
+      const { report } = result;
+      return {
+        event: report.event,
+        teams: {
+          home: `${report.teams.home.name} (${report.teams.home.rating})`,
+          away: `${report.teams.away.name} (${report.teams.away.rating})`
+        },
+        probabilities: {
+          homeWin: report.probabilities.homeWin,
+          draw: report.probabilities.draw,
+          awayWin: report.probabilities.awayWin,
+          eloDiff: report.probabilities.eloDiff
+        },
+        buySignals: report.markets
+          .filter((market) => market.buyYesSignal === "buy")
+          .sort((a, b) => (b.buyYesEdge ?? -Infinity) - (a.buyYesEdge ?? -Infinity))
+      };
+    }));
     return;
   }
 

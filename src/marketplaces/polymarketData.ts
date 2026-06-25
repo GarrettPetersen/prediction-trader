@@ -4,6 +4,46 @@ const POLYMARKET_DATA_API_BASE_URL = "https://data-api.polymarket.com";
 const POLYMARKET_GAMMA_BASE_URL = "https://gamma-api.polymarket.com";
 const NON_ZERO_POSITION_EPSILON = 0.000001;
 
+export interface PolymarketBookLevel {
+  price: number;
+  size: number;
+}
+
+export interface PolymarketBook {
+  bids: PolymarketBookLevel[];
+  asks: PolymarketBookLevel[];
+  bestBid?: PolymarketBookLevel;
+  bestAsk?: PolymarketBookLevel;
+}
+
+export interface PolymarketPosition {
+  title?: string;
+  outcome?: string;
+  size: number;
+  avgPrice: number;
+  currentValue: number;
+  curPrice: number;
+  cashPnl: number;
+  percentPnl: number;
+  redeemable: boolean;
+  slug?: string;
+  eventSlug?: string;
+  conditionId?: string;
+  asset?: string;
+  outcomeIndex: number;
+  negativeRisk: boolean;
+  endDate?: string;
+}
+
+export interface PolymarketPositionsSnapshot {
+  user: string;
+  count: number;
+  totalCurrentValue: number;
+  redeemableCount: number;
+  redeemableCurrentValue: number;
+  positions: PolymarketPosition[];
+}
+
 export interface PolymarketPositionsOptions {
   includeZero?: boolean;
   limit?: number;
@@ -39,7 +79,7 @@ async function fetchJson(url: URL): Promise<unknown> {
   return response.json();
 }
 
-function normalizePosition(position: Record<string, unknown>) {
+function normalizePosition(position: Record<string, unknown>): PolymarketPosition {
   return {
     title: typeof position.title === "string" ? position.title : undefined,
     outcome: typeof position.outcome === "string" ? position.outcome : undefined,
@@ -63,7 +103,7 @@ function normalizePosition(position: Record<string, unknown>) {
 export async function getPolymarketPositions(
   config: AppConfig,
   options: PolymarketPositionsOptions = {}
-) {
+): Promise<PolymarketPositionsSnapshot> {
   const user = config.polymarket.funderAddress;
   if (!user) {
     throw new Error("POLYMARKET_FUNDER_ADDRESS is required for polymarket:positions.");
@@ -103,11 +143,11 @@ export async function getPolymarketPositions(
   };
 }
 
-async function getPolymarketBook(config: AppConfig, tokenId: string) {
+export async function getPolymarketBook(config: AppConfig, tokenId: string): Promise<PolymarketBook> {
   const url = new URL("/book", config.polymarket.host);
   url.searchParams.set("token_id", tokenId);
   const book = await fetchJson(url);
-  if (!book || typeof book !== "object") return {};
+  if (!book || typeof book !== "object") return { bids: [], asks: [] };
 
   const rawBook = book as Record<string, unknown>;
   const bids = Array.isArray(rawBook.bids) ? rawBook.bids : [];
@@ -130,6 +170,8 @@ async function getPolymarketBook(config: AppConfig, tokenId: string) {
     .sort((a, b) => a.price - b.price);
 
   return {
+    bids: bidLevels,
+    asks: askLevels,
     bestBid: bidLevels[0],
     bestAsk: askLevels[0]
   };

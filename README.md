@@ -14,11 +14,16 @@ live execution difficult to trigger by accident.
 - Redeems resolved Polymarket positions through the official
   `@polymarket/client` SDK gasless workflow.
 - Requests and submits Vistadex RFQ trades through the public `vistadex` SDK.
+- Finds same-market YES/NO position pairs and can sell equal shares of both
+  sides to unlock cash-like complete-set exposure.
+- Caches international football Elo ratings and compares model fair prices to
+  Polymarket 1X2 soccer markets.
 - Requires explicit live-trading gates before any command can submit a trade.
 - Keeps wallet keys and API credentials out of source control.
 
-This is not a strategy engine yet. It is the execution plumbing an agent can use
-after a human or strategy process chooses a market, side, and size.
+This is not a mature strategy engine yet. It has execution plumbing plus a
+small, inspectable football model that can generate candidate bets for human or
+agent review.
 
 ## Safety Model
 
@@ -134,6 +139,59 @@ prints private keys or API secrets. In network mode it also checks Polymarket
 geoblocking, the Polymarket deposit wallet contract code, Polymarket CLOB
 collateral balance/allowances, and Vistadex USDC balance when a Vistadex client
 API key is configured.
+
+## Football Edge Model
+
+The first strategy helper is a pre-match international soccer model built on
+World Football Elo ratings. It downloads and caches:
+
+- `https://www.eloratings.net/World.tsv`
+- `https://www.eloratings.net/en.teams.tsv`
+
+The cached copies live under `data/football/`. Refresh them when you want a new
+rating snapshot:
+
+```bash
+npm run football:ratings -- --refresh --team Mexico
+npm run football:ratings -- --team "Côte d'Ivoire"
+```
+
+The model estimates home win, draw, and away win probabilities from Elo
+difference. Draw probability starts near `27%` for evenly matched teams and
+decays as the Elo gap grows. These defaults are intentionally simple and should
+be treated as a baseline, not a finished edge.
+
+Price one Polymarket football event:
+
+```bash
+npm run football:price -- --slug fifwc-cze-mex-2026-06-24
+```
+
+Screen several slugs and show only model-backed buy signals:
+
+```bash
+npm run football:screen -- \
+  --slugs fifwc-tun-nld-2026-06-25,fifwc-tur-usa-2026-06-25,fifwc-ecu-ger-2026-06-25 \
+  --edge-threshold 0.03
+```
+
+Useful options:
+
+- `--refresh` fetches a fresh Elo snapshot before pricing.
+- `--home TEAM --away TEAM` overrides team inference from the event title.
+- `--edge-threshold N` changes the minimum model edge required for a buy signal.
+- `--home-advantage N`, `--draw-base N`, `--draw-min N`, `--draw-scale N`, and
+  `--elo-scale N` let you tune model assumptions.
+
+Current limits:
+
+- It is pre-match only. Live score, red cards, time remaining, shots, xG, player
+  availability, and weather are not included.
+- It has not been backtested against historical prediction-market prices.
+- It does not price market fees, spread/slippage, or correlated exposure across
+  multiple bets.
+- It is a candidate generator. Review `yesBestAsk`, model probability, edge,
+  market liquidity, and timing before trading.
 
 ## Credential Setup
 
@@ -398,6 +456,44 @@ gate can estimate notional. Vistadex execution uses the public `vistadex` SDK,
 which handles RFQ creation, quote waiting, transaction signing, submission, and
 waiting for filler acceptance.
 
+## Portfolio Cleanup
+
+Sometimes the agent ends up holding both sides of the same binary market, for
+example YES and NO on the same condition. Equal shares of both sides behave like
+locked cash: one side will pay `$1` and the other side will pay `$0`, regardless
+of the outcome. The `portfolio:unlock` command finds those pairs and prepares
+equal-size sell orders so the remaining portfolio keeps the same directional
+shape while freeing cash, minus bid/RFQ spread.
+
+Preview paired exposure across both venues:
+
+```bash
+npm run portfolio:unlock -- --venue all
+```
+
+Limit the preview to Polymarket, or ignore tiny pairs:
+
+```bash
+npm run portfolio:unlock -- \
+  --venue polymarket \
+  --min-unlock-usd 1
+```
+
+Submit the paired sells only after reviewing the preview:
+
+```bash
+PREDICTION_TRADER_LIVE=1 npm run portfolio:unlock -- \
+  --execute \
+  --venue all \
+  --max-usd 25
+```
+
+Execution is not atomic. The command sends two sell orders per pair, using
+Polymarket `FOK` sells at current best bids and Vistadex RFQ sells with the
+quoted price as the sell limit. If one leg fails, the command reports it and
+does not silently pretend the pair was fully unlocked. Exact protocol-level
+merge/split operations are not implemented yet.
+
 ## Agent Operating Checklist
 
 Before an agent is allowed to submit trades:
@@ -435,8 +531,8 @@ PREDICTION_TRADER_LIVE=1 npm run vistadex:trade -- \
 - No strategy loop yet.
 - Polymarket event lookup can fetch outcome token IDs and orderbook tops by
   slug, but there is no broad market screener yet.
-- Position snapshots exist, but there is no portfolio reconciliation or
-  daily-loss accounting yet.
+- Position snapshots and paired-position cleanup exist, but there is no full
+  portfolio reconciliation or daily-loss accounting yet.
 - No persistent trade ledger yet.
 - No automatic position exit rules yet.
 - Vistadex quote/trade commands require a funded Solana wallet and a client API

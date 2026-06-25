@@ -16,7 +16,11 @@
     "vistadex:event": "node --import tsx src/cli.ts vistadex:event",
     "vistadex:positions": "node --import tsx src/cli.ts vistadex:positions",
     "vistadex:quote": "node --import tsx src/cli.ts vistadex:quote",
-    "vistadex:trade": "node --import tsx src/cli.ts vistadex:trade"
+    "vistadex:trade": "node --import tsx src/cli.ts vistadex:trade",
+    "portfolio:unlock": "node --import tsx src/cli.ts portfolio:unlock",
+    "football:ratings": "node --import tsx src/cli.ts football:ratings",
+    "football:price": "node --import tsx src/cli.ts football:price",
+    "football:screen": "node --import tsx src/cli.ts football:screen"
   },
   "dependencies": {
     "@polymarket/client": "^0.1.0-beta.4",
