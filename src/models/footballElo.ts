@@ -243,7 +243,7 @@ export function estimateMatchProbabilities(
   };
 }
 
-function parseFixtureTitle(title: unknown): { home: string; away: string } | undefined {
+export function parseFootballFixtureTitle(title: unknown): { home: string; away: string } | undefined {
   if (typeof title !== "string") return undefined;
   const match = /^(.+?)\s+vs\.\s+(.+)$/.exec(title);
   if (!match) return undefined;
@@ -303,7 +303,7 @@ export async function pricePolymarketFootballEvent(
     getPolymarketEvent(config, slug, { includeOrderbook: options.includeOrderbook ?? true }),
     loadFootballEloDataset(options)
   ]);
-  const parsedFixture = parseFixtureTitle((event as { title?: unknown }).title);
+  const parsedFixture = parseFootballFixtureTitle((event as { title?: unknown }).title);
   const fixture = {
     home: options.home ?? parsedFixture?.home,
     away: options.away ?? parsedFixture?.away

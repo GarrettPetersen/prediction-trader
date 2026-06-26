@@ -13,6 +13,9 @@
     "polymarket:order": "node --import tsx src/cli.ts polymarket:order",
     "polymarket:positions": "node --import tsx src/cli.ts polymarket:positions",
     "polymarket:redeem": "node --import tsx src/cli.ts polymarket:redeem",
+    "ledger:list": "node --import tsx src/cli.ts ledger:list",
+    "ledger:summary": "node --import tsx src/cli.ts ledger:summary",
+    "ledger:backfill": "node --import tsx src/cli.ts ledger:backfill",
     "vistadex:event": "node --import tsx src/cli.ts vistadex:event",
     "vistadex:positions": "node --import tsx src/cli.ts vistadex:positions",
     "vistadex:quote": "node --import tsx src/cli.ts vistadex:quote",
@@ -20,7 +23,9 @@
     "portfolio:unlock": "node --import tsx src/cli.ts portfolio:unlock",
     "football:ratings": "node --import tsx src/cli.ts football:ratings",
     "football:price": "node --import tsx src/cli.ts football:price",
-    "football:screen": "node --import tsx src/cli.ts football:screen"
+    "football:screen": "node --import tsx src/cli.ts football:screen",
+    "football:score": "node --import tsx src/cli.ts football:score",
+    "score:predict": "node --import tsx src/cli.ts score:predict"
   },
   "dependencies": {
     "@polymarket/client": "^0.1.0-beta.4",

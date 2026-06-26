@@ -352,3 +352,24 @@ export async function executePolymarketRedeem(
     }
   }
 }
+
+export interface PolymarketTradeHistoryOptions {
+  market?: string;
+  assetId?: string;
+  after?: string;
+  before?: string;
+  onlyFirstPage?: boolean;
+}
+
+export async function getPolymarketTradeHistory(
+  config: AppConfig,
+  options: PolymarketTradeHistoryOptions = {}
+): Promise<unknown[]> {
+  const { client } = await createPolymarketClient(config);
+  const params: Record<string, string> = {};
+  if (options.market) params.market = options.market;
+  if (options.assetId) params.asset_id = options.assetId;
+  if (options.after) params.after = options.after;
+  if (options.before) params.before = options.before;
+  return client.getTrades(params, options.onlyFirstPage ?? false);
+}

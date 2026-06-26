@@ -1,14 +1,20 @@
 .env
 .env.*
 !.env.example
+
 node_modules/
 dist/
 coverage/
-.DS_Store
 *.log
 *.tsbuildinfo
 
-# Never commit wallet material.
+# Never commit wallet material or local account history.
+wallets/
 *.keypair.json
 keypair.json
 wallet.json
+
+data/trades/*.jsonl
+data/trades/*.jsonl.*
+
+.DS_Store

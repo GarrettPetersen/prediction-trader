@@ -18,6 +18,10 @@ live execution difficult to trigger by accident.
   sides to unlock cash-like complete-set exposure.
 - Caches international football Elo ratings and compares model fair prices to
   Polymarket 1X2 soccer markets.
+- Predicts soccer scorelines with reusable Poisson/Monte Carlo score-model
+  utilities, including exact scores, BTTS, and over/under totals.
+- Records executed trades/redemptions and backfilled venue state to a local
+  JSONL ledger for audit and PnL reconstruction.
 - Requires explicit live-trading gates before any command can submit a trade.
 - Keeps wallet keys and API credentials out of source control.
 
@@ -73,7 +77,13 @@ Shared controls:
 ```bash
 PREDICTION_TRADER_LIVE=0
 PREDICTION_TRADER_MAX_USD=5
+PREDICTION_TRADER_LEDGER_PATH=data/trades/ledger.jsonl
 ```
+
+The default ledger path is local-only and ignored by git. It contains account
+activity, order IDs, transaction hashes/signatures, tickets, and venue responses;
+it should be treated as private trading history even though it does not contain
+private keys or API secrets.
 
 Polymarket:
 
@@ -192,6 +202,95 @@ Current limits:
   multiple bets.
 - It is a candidate generator. Review `yesBestAsk`, model probability, edge,
   market liquidity, and timing before trading.
+
+## Football Score Model
+
+The score model is separate from the trading adapters so it can be reused across
+venues and, later, other sports. The reusable pieces live in
+`src/models/scoreDistribution.ts`:
+
+- independent Poisson score grids
+- seeded Monte Carlo score simulations
+- exact-score probabilities
+- home/draw/away summaries
+- both-teams-to-score probabilities
+- over/under totals for configurable lines
+
+The soccer adapter in `src/models/soccerPoisson.ts` can fit team attack and
+defense rates from historical match CSVs. It supports a simple canonical schema:
+
+```csv
+date,home_team,away_team,home_score,away_score,neutral
+2026-01-01,Team A,Team B,2,1,false
+```
+
+It also accepts common football-data style columns such as `HomeTeam`,
+`AwayTeam`, `FTHG`, and `FTAG`.
+
+Fit from historical data and ask for exact scores plus high/low lines:
+
+```bash
+npm run score:predict -- \
+  --sport soccer \
+  --home "Team A" \
+  --away "Team B" \
+  --history data/football/history.csv \
+  --scores 0-0,1-0,1-1,2-1 \
+  --total-lines 1.5,2.5,3.5 \
+  --simulations 100000 \
+  --seed team-a-team-b
+```
+
+Useful fitting options:
+
+- `--prior-weight N` shrinks low-sample teams toward league average. The default
+  is `8`.
+- `--half-life-days N` downweights older matches exponentially.
+- `--neutral` removes home-field framing and uses blended home/away rates.
+- `--max-score N` controls the exact score grid. The default is `10`.
+- `--top N` controls how many exact scores are printed.
+
+For international matches where we do not yet have a clean historical results
+file, `football:score` can derive a scoreline distribution from the current
+Football Elo 1X2 model. It fits Poisson means to the Elo home/draw/away prior at
+a configurable expected total goals level:
+
+```bash
+npm run football:score -- \
+  --home "Türkiye" \
+  --away "United States" \
+  --scores 0-0,1-1,2-1 \
+  --total-lines 1.5,2.5,3.5 \
+  --expected-total-goals 2.6 \
+  --simulations 50000 \
+  --seed tur-usa
+```
+
+You can also pass a Polymarket event slug to infer teams from the event title:
+
+```bash
+npm run football:score -- \
+  --slug fifwc-tur-usa-2026-06-25 \
+  --scores 0-0,1-1,2-1 \
+  --total-lines 1.5,2.5,3.5
+```
+
+If `--history` is supplied to `football:score`, it uses the historical CSV
+soccer model instead of the Elo-derived fallback.
+
+Current score-model limits:
+
+- The historical soccer model uses team-level goals for/against. It does not
+  include injuries, lineups, cards, rest, travel, weather, shots, or xG yet.
+- The Elo fallback is a bridge for immediate international use; real historical
+  result data should be preferred when available.
+- Exact score and total-goals probabilities should be compared to market prices,
+  spreads, liquidity, fees, and correlation with the existing portfolio before
+  trading.
+- The generic distribution utilities can be reused for other sports, but each
+  sport still needs its own scoring-rate fitter. Basketball, hockey, baseball,
+  and football should not share soccer's low-scoring Poisson assumptions without
+  sport-specific validation.
 
 ## Credential Setup
 
@@ -494,14 +593,57 @@ quoted price as the sell limit. If one leg fails, the command reports it and
 does not silently pretend the pair was fully unlocked. Exact protocol-level
 merge/split operations are not implemented yet.
 
+## Trade Ledger
+
+Live `polymarket:order`, `polymarket:redeem`, `vistadex:trade`, and
+`portfolio:unlock` executions append a JSONL record to
+`PREDICTION_TRADER_LEDGER_PATH`. The record includes the command, ticket,
+preview, execution response, stable venue IDs when available, and a dedupe key.
+The default file is `data/trades/ledger.jsonl`, which is ignored by git.
+
+Backfill the ledger from venue APIs:
+
+```bash
+npm run ledger:backfill
+```
+
+Backfill is safe to rerun. It dedupes by venue-provided IDs or stable position
+snapshot keys. Current coverage:
+
+- Polymarket CLOB fills via the authenticated CLOB `getTrades` endpoint.
+- Polymarket current and redeemable positions via the data API.
+- Vistadex current positions via the published SDK.
+
+The published Vistadex SDK does not expose historical user fills, so Vistadex
+pre-ledger history can only be reconstructed from current positions and future
+local execution records.
+
+Inspect the local ledger:
+
+```bash
+npm run ledger:summary
+npm run ledger:list -- --limit 20
+npm run ledger:list -- --venue polymarket --action fill
+npm run ledger:list -- --limit 5 --raw
+```
+
+Use `--ledger PATH` with any ledger command or execution command if you want a
+separate audit file for a run. `ledger:list` prints compact rows by default;
+add `--raw` when you want the full venue payload for an audit. The
+`estimatedNotionalUsd` field in summaries is total recorded audit notional
+across fills and snapshots; it is not realized PnL and can double-count when a
+fill and the resulting position are both present.
+
 ## Agent Operating Checklist
 
 Before an agent is allowed to submit trades:
 
 1. Confirm `.env` exists and secrets are local-only.
 2. Run `npm run build` and `npm test`.
-3. Confirm bankroll and per-trade limits.
-4. Confirm the trading mandate:
+3. Run `npm run ledger:backfill` if this is a new checkout or the ledger may be
+   stale.
+4. Confirm bankroll and per-trade limits.
+5. Confirm the trading mandate:
    - allowed venues
    - max per-trade size
    - max daily spend or loss
@@ -510,9 +652,11 @@ Before an agent is allowed to submit trades:
    - whether resting orders are allowed
    - exit rules
    - whether every trade needs human approval
-5. Run the command once without `--execute`.
-6. Read the preview output.
-7. Only then rerun with `PREDICTION_TRADER_LIVE=1` and `--execute`.
+6. Run the command once without `--execute`.
+7. Read the preview output.
+8. Only then rerun with `PREDICTION_TRADER_LIVE=1` and `--execute`.
+9. Run `npm run ledger:summary` after trading to confirm the execution was
+   recorded.
 
 Suggested first live test:
 
@@ -533,7 +677,8 @@ PREDICTION_TRADER_LIVE=1 npm run vistadex:trade -- \
   slug, but there is no broad market screener yet.
 - Position snapshots and paired-position cleanup exist, but there is no full
   portfolio reconciliation or daily-loss accounting yet.
-- No persistent trade ledger yet.
+- The trade ledger records executions and backfilled state, but it is not yet a
+  full tax-grade accounting system or realized/unrealized PnL reconciler.
 - No automatic position exit rules yet.
 - Vistadex quote/trade commands require a funded Solana wallet and a client API
   key.

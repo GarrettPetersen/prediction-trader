@@ -11,6 +11,7 @@ const defaultUrl = (url: string) =>
 const envSchema = z.object({
   PREDICTION_TRADER_LIVE: z.string().default("0"),
   PREDICTION_TRADER_MAX_USD: z.coerce.number().positive().default(5),
+  PREDICTION_TRADER_LEDGER_PATH: z.string().default("data/trades/ledger.jsonl"),
 
   POLYMARKET_HOST: defaultUrl("https://clob.polymarket.com"),
   POLYMARKET_CHAIN_ID: z.coerce.number().int().positive().default(137),
@@ -38,6 +39,9 @@ export function loadConfig(overrides: Record<string, string | undefined> = {}) {
     safety: {
       liveEnabled: parsed.PREDICTION_TRADER_LIVE === LIVE_TRADING_ENV_VALUE,
       maxUsd: parsed.PREDICTION_TRADER_MAX_USD
+    },
+    ledger: {
+      path: parsed.PREDICTION_TRADER_LEDGER_PATH
     },
     polymarket: {
       host: parsed.POLYMARKET_HOST,
