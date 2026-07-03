@@ -8,7 +8,10 @@ import {
   type PolymarketPosition
 } from "./marketplaces/polymarketData.js";
 import {
+  getVistadexPublicActivity,
   getVistadexPositions,
+  type VistadexActivityItem,
+  type VistadexActivityOptions,
   type VistadexPosition
 } from "./marketplaces/vistadex.js";
 import {
@@ -32,6 +35,7 @@ export interface LedgerBackfillOptions {
   includeFills?: boolean;
   polymarketOnlyFirstPage?: boolean;
   polymarketTradeParams?: PolymarketTradeHistoryOptions;
+  vistadexActivityParams?: VistadexActivityOptions;
   positionLimit?: number;
 }
 
@@ -40,7 +44,10 @@ export interface LedgerBackfillResult extends AppendLedgerResult {
   generated: {
     polymarketFills: number;
     polymarketPositions: number;
+    vistadexActivity: number;
+    vistadexFills: number;
     vistadexPositions: number;
+    vistadexRedemptions: number;
   };
 }
 
@@ -158,7 +165,76 @@ function recordFromVistadexPosition(position: VistadexPosition): LedgerRecord {
     },
     raw: position,
     notes: [
-      "Backfilled from current Vistadex position state; the published SDK does not expose historical user fills."
+      "Backfilled from current Vistadex position state; this is not the original execution record."
+    ]
+  });
+}
+
+function vistadexActivityOutcome(item: VistadexActivityItem): string | undefined {
+  return item.metadata?.outcomes?.[item.outcomeIndex]
+    ?? (item.type === "redemption" ? item.outcomeLabel : undefined);
+}
+
+function recordFromVistadexActivity(item: VistadexActivityItem): LedgerRecord {
+  const outcome = vistadexActivityOutcome(item);
+  const metadata = item.metadata;
+  const price = item.type === "trade"
+    ? ledgerNumber(item.pricePerShare)
+    : ledgerNumber(item.payout);
+  const shares = item.type === "trade"
+    ? ledgerNumber(item.shares)
+    : ledgerNumber(item.quantity);
+  const notionalUsd = item.type === "trade"
+    ? ledgerNumber(item.totalUsd)
+    : ledgerNumber(item.valueUsd);
+  const action = item.type === "trade" ? "fill" : "redeem";
+  const status = item.type === "trade"
+    ? item.status
+    : price === undefined
+      ? "redeemed"
+      : price > 0
+        ? "redeemed_win"
+        : "redeemed_loss";
+  const side = item.type === "trade" ? item.side : undefined;
+  const valueDescription = item.type === "trade"
+    ? [
+        side?.toUpperCase(),
+        shares === undefined ? undefined : `${shares} shares`,
+        outcome,
+        price === undefined ? undefined : `at ${price}`
+      ].filter(Boolean).join(" ")
+    : [
+        "REDEEM",
+        shares === undefined ? undefined : `${shares} shares`,
+        outcome,
+        notionalUsd === undefined ? undefined : `for $${notionalUsd}`
+      ].filter(Boolean).join(" ");
+
+  return buildBackfillLedgerRecord({
+    venue: "vistadex",
+    action,
+    dedupeKey: `vistadex:activity:${item.type}:${item.id}`,
+    occurredAt: normalizeLedgerTimestamp(item.timestamp),
+    status,
+    side,
+    price,
+    shares,
+    notionalUsd,
+    summary: valueDescription,
+    market: {
+      conditionId: item.conditionId,
+      slug: metadata?.slug,
+      question: metadata?.question,
+      outcome,
+      outcomeIndex: item.outcomeIndex
+    },
+    ids: {
+      activityId: item.id,
+      transactionSignature: item.transactionSignature
+    },
+    raw: item,
+    notes: [
+      "Backfilled from Vistadex public profile activity."
     ]
   });
 }
@@ -180,6 +256,9 @@ export async function buildLedgerBackfillRecords(
   const generated = {
     polymarketFills: 0,
     polymarketPositions: 0,
+    vistadexActivity: 0,
+    vistadexFills: 0,
+    vistadexRedemptions: 0,
     vistadexPositions: 0
   };
 
@@ -205,14 +284,25 @@ export async function buildLedgerBackfillRecords(
     }
   }
 
-  if (wantsVenue(options.venue, "vistadex") && includePositions) {
-    const snapshot = await getVistadexPositions(config, {
-      includeZero: true,
-      limit: options.positionLimit
-    });
-    const positionRecords = snapshot.positions.map(recordFromVistadexPosition);
-    generated.vistadexPositions = positionRecords.length;
-    records.push(...positionRecords);
+  if (wantsVenue(options.venue, "vistadex")) {
+    if (includeFills) {
+      const snapshot = await getVistadexPublicActivity(config, options.vistadexActivityParams);
+      const activityRecords = snapshot.items.map(recordFromVistadexActivity);
+      generated.vistadexActivity = activityRecords.length;
+      generated.vistadexFills = activityRecords.filter((record) => record.action === "fill").length;
+      generated.vistadexRedemptions = activityRecords.filter((record) => record.action === "redeem").length;
+      records.push(...activityRecords);
+    }
+
+    if (includePositions) {
+      const snapshot = await getVistadexPositions(config, {
+        includeZero: true,
+        limit: options.positionLimit
+      });
+      const positionRecords = snapshot.positions.map(recordFromVistadexPosition);
+      generated.vistadexPositions = positionRecords.length;
+      records.push(...positionRecords);
+    }
   }
 
   return { records, generated };

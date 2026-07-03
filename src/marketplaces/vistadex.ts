@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import { Connection, PublicKey } from "@solana/web3.js";
 import type { AppConfig } from "../config.js";
-import type { TradeExecution, TradePreview, VistadexTradeTicket } from "../types.js";
+import type { TradeExecution, TradePreview, TradeSide, VistadexTradeTicket } from "../types.js";
 import { keypairFromVistadexSecret } from "../vistadexWallet.js";
 
 type VistadexModule = typeof import("vistadex");
@@ -39,6 +41,85 @@ export interface VistadexPositionsSnapshot {
 export interface VistadexPositionsOptions {
   includeZero?: boolean;
   limit?: number;
+}
+
+export interface VistadexUSDCBalanceSnapshot {
+  walletAddress: string;
+  tokenAccount: string;
+  mint: string;
+  balanceRaw: string;
+  decimals: number;
+  cashUsd: string;
+}
+
+export interface VistadexPublicUser {
+  username: string;
+  walletAddress?: string;
+  createdAt?: string;
+  avatarUrl?: string | null;
+  isPrivate?: boolean;
+}
+
+export interface VistadexPublicUserStats {
+  totalTrades?: number;
+}
+
+export interface VistadexActivityMetadata {
+  question?: string;
+  slug?: string;
+  icon?: string | null;
+  image?: string | null;
+  category?: string | null;
+  outcomes?: string[];
+}
+
+export interface VistadexActivityTrade {
+  type: "trade";
+  id: string;
+  timestamp: string;
+  conditionId: string;
+  outcomeIndex: number;
+  side: TradeSide;
+  shares: number;
+  pricePerShare: number;
+  totalUsd: number;
+  status?: string;
+  transactionSignature?: string;
+  metadata?: VistadexActivityMetadata;
+}
+
+export interface VistadexActivityRedemption {
+  type: "redemption";
+  id: string;
+  timestamp: string;
+  conditionId: string;
+  outcomeIndex: number;
+  outcomeLabel?: string;
+  quantity: number;
+  payout: number;
+  valueUsd: number;
+  transactionSignature?: string;
+  metadata?: VistadexActivityMetadata;
+}
+
+export type VistadexActivityItem = VistadexActivityTrade | VistadexActivityRedemption;
+
+export interface VistadexActivityOptions {
+  username?: string;
+  walletAddress?: string;
+  limit?: number;
+  maxPages?: number;
+}
+
+export interface VistadexActivitySnapshot {
+  username?: string;
+  walletAddress: string;
+  stats?: VistadexPublicUserStats;
+  count: number;
+  pages: number;
+  hasMore: boolean;
+  nextCursor?: string | null;
+  items: VistadexActivityItem[];
 }
 
 async function loadVistadex() {
@@ -90,6 +171,38 @@ function normalizePrice(value: unknown): VistadexPositionPrice | undefined {
 
 function normalizeOutcomes(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String) : [];
+}
+
+function normalizeUsername(username: string): string {
+  return username.replace(/^@/, "").trim().toLowerCase();
+}
+
+function vistadexAppUrl(config: AppConfig, path: string, params?: Record<string, string | number | undefined>): URL {
+  const url = new URL(path, config.vistadex.appBaseUrl);
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (value !== undefined) url.searchParams.set(key, String(value));
+  }
+  return url;
+}
+
+async function fetchVistadexAppJson<T>(config: AppConfig, path: string, params?: Record<string, string | number | undefined>): Promise<T> {
+  const url = vistadexAppUrl(config, path, params);
+  const response = await fetch(url, {
+    headers: {
+      accept: "application/json"
+    }
+  });
+  const text = await response.text();
+  const body = text.length > 0 ? JSON.parse(text) : {};
+
+  if (!response.ok) {
+    const message = body && typeof body === "object" && "error" in body
+      ? String((body as { error?: unknown }).error)
+      : `Vistadex app API request failed with ${response.status}`;
+    throw new Error(message);
+  }
+
+  return body as T;
 }
 
 function sanitizeVistadexQuoteResult(response: any) {
@@ -145,6 +258,70 @@ export async function getVistadexEvent(config: AppConfig, slug: string): Promise
   return client.getEvent(slug);
 }
 
+export async function getVistadexPublicUser(
+  config: AppConfig,
+  username: string
+): Promise<{
+  user?: VistadexPublicUser;
+  stats?: VistadexPublicUserStats;
+}> {
+  return fetchVistadexAppJson(config, "/api/public/user", {
+    username: normalizeUsername(username)
+  });
+}
+
+export async function getVistadexPublicActivity(
+  config: AppConfig,
+  options: VistadexActivityOptions = {}
+): Promise<VistadexActivitySnapshot> {
+  const username = options.username ? normalizeUsername(options.username) : undefined;
+  const publicUser = username ? await getVistadexPublicUser(config, username) : undefined;
+  const walletAddress = options.walletAddress
+    ?? publicUser?.user?.walletAddress
+    ?? (await loadWallet(config)).publicKey.toBase58();
+
+  if (!walletAddress) {
+    throw new Error("Vistadex public activity requires a wallet address or public profile username.");
+  }
+
+  const limit = Math.min(Math.max(Math.trunc(options.limit ?? 50), 1), 100);
+  const maxPages = Math.max(Math.trunc(options.maxPages ?? 20), 1);
+  const items: VistadexActivityItem[] = [];
+  let cursor: string | undefined;
+  let nextCursor: string | null | undefined;
+  let hasMore = false;
+  let pages = 0;
+
+  while (pages < maxPages) {
+    const page = await fetchVistadexAppJson<{
+      items?: VistadexActivityItem[];
+      hasMore?: boolean;
+      nextCursor?: string | null;
+    }>(config, "/api/public/order-history", {
+      wallet: walletAddress,
+      limit,
+      cursor
+    });
+    pages += 1;
+    items.push(...(Array.isArray(page.items) ? page.items : []));
+    hasMore = page.hasMore === true;
+    nextCursor = page.nextCursor ?? null;
+    if (!hasMore || !nextCursor) break;
+    cursor = nextCursor;
+  }
+
+  return {
+    username,
+    walletAddress,
+    stats: publicUser?.stats,
+    count: items.length,
+    pages,
+    hasMore,
+    nextCursor,
+    items
+  };
+}
+
 export async function getVistadexPositions(
   config: AppConfig,
   options: VistadexPositionsOptions = {}
@@ -184,6 +361,45 @@ export async function getVistadexPositions(
     count: normalized.length,
     positions: normalized
   };
+}
+
+export async function getVistadexUSDCBalance(config: AppConfig): Promise<VistadexUSDCBalanceSnapshot> {
+  const mod = await loadVistadex();
+  const wallet = await loadWallet(config);
+  const mintAddress = (mod as any).USDC_MINT;
+  if (!mintAddress) {
+    throw new Error("Vistadex USDC_MINT export was not found.");
+  }
+
+  const mint = new PublicKey(mintAddress);
+  const tokenAccount = getAssociatedTokenAddressSync(mint, wallet.publicKey);
+  const connection = new Connection(config.vistadex.rpcUrl);
+
+  try {
+    const balance = await connection.getTokenAccountBalance(tokenAccount);
+    return {
+      walletAddress: wallet.publicKey.toBase58(),
+      tokenAccount: tokenAccount.toBase58(),
+      mint: mint.toBase58(),
+      balanceRaw: balance.value.amount,
+      decimals: balance.value.decimals,
+      cashUsd: balance.value.uiAmountString ?? "0"
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/could not find account|invalid param|account not found/i.test(message)) {
+      throw error;
+    }
+
+    return {
+      walletAddress: wallet.publicKey.toBase58(),
+      tokenAccount: tokenAccount.toBase58(),
+      mint: mint.toBase58(),
+      balanceRaw: "0",
+      decimals: 6,
+      cashUsd: "0"
+    };
+  }
 }
 
 export async function quoteVistadexTrade(

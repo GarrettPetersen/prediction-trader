@@ -1,4 +1,4 @@
-import { createWalletClient, http, type Hex } from "viem";
+import { createPublicClient, createWalletClient, erc20Abi, formatUnits, http, type Hex } from "viem";
 import { polygon } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import type { AppConfig } from "../config.js";
@@ -19,6 +19,14 @@ const POLYMARKET_COLLATERAL_TOKEN = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 const POLYMARKET_COLLATERAL_ADAPTER = "0xAdA100Db00Ca00073811820692005400218FcE1f";
 const POLYMARKET_NEG_RISK_COLLATERAL_ADAPTER = "0xadA2005600Dec949baf300f4C6120000bDB6eAab";
 const POLYMARKET_GAMMA_BASE_URL = "https://gamma-api.polymarket.com";
+
+export interface PolymarketCollateralBalanceSnapshot {
+  funderAddress: string;
+  tokenAddress: string;
+  balanceRaw: string;
+  decimals: number;
+  cashUsd: string;
+}
 
 export function getPolymarketExecutionStatus(response: any): TradeExecution["status"] {
   if (
@@ -78,6 +86,43 @@ async function createPolymarketClient(config: AppConfig) {
       funderAddress: config.polymarket.funderAddress
     }),
     mod
+  };
+}
+
+export async function getPolymarketCollateralBalance(
+  config: AppConfig
+): Promise<PolymarketCollateralBalanceSnapshot> {
+  const funderAddress = config.polymarket.funderAddress;
+  if (!funderAddress) {
+    throw new Error("POLYMARKET_FUNDER_ADDRESS is required for Polymarket cash snapshots.");
+  }
+
+  const client = createPublicClient({
+    chain: polygon,
+    transport: http(config.polymarket.rpcUrl)
+  });
+  const tokenAddress = POLYMARKET_COLLATERAL_TOKEN as Hex;
+  const account = funderAddress as Hex;
+  const [balance, decimals] = await Promise.all([
+    client.readContract({
+      address: tokenAddress,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [account]
+    }),
+    client.readContract({
+      address: tokenAddress,
+      abi: erc20Abi,
+      functionName: "decimals"
+    }).catch(() => 6)
+  ]);
+
+  return {
+    funderAddress,
+    tokenAddress,
+    balanceRaw: balance.toString(),
+    decimals: Number(decimals),
+    cashUsd: formatUnits(balance, Number(decimals))
   };
 }
 

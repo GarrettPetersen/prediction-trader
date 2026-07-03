@@ -24,10 +24,41 @@ const envSchema = z.object({
   POLYGON_RPC_URL: defaultUrl("https://polygon-bor-rpc.publicnode.com"),
 
   VISTADEX_CLIENT_API_KEY: optionalString,
+  VISTADEX_APP_URL: defaultUrl("https://www.app.vistadex.com"),
   VISTADEX_RPC_URL: defaultUrl("https://api.mainnet-beta.solana.com"),
   VISTADEX_POSITIONS_API_URL: defaultUrl("https://markets.vistadex.com"),
   VISTADEX_SECRET_KEY: optionalString,
-  VISTADEX_KEYPAIR_PATH: optionalString
+  VISTADEX_KEYPAIR_PATH: optionalString,
+
+  OPEN_METEO_FORECAST_URL: defaultUrl("https://api.open-meteo.com/v1/forecast"),
+  OPEN_METEO_PREVIOUS_RUNS_URL: defaultUrl("https://previous-runs-api.open-meteo.com/v1/forecast"),
+  OPEN_METEO_GEOCODING_URL: defaultUrl("https://geocoding-api.open-meteo.com/v1/"),
+  NWS_API_URL: defaultUrl("https://api.weather.gov"),
+  NWS_USER_AGENT: z.preprocess(emptyToUndefined, z.string().default("prediction-trader/0.1 weatheredge")),
+  HKO_API_URL: defaultUrl("https://data.weather.gov.hk/weatherAPI/opendata/weather.php"),
+  NOAA_CDO_API_URL: defaultUrl("https://www.ncei.noaa.gov/cdo-web/api/v2"),
+  NOAA_CDO_TOKEN: optionalString,
+  WEATHER_CACHE_DIR: z.preprocess(emptyToUndefined, z.string().default(".cache/weatheredge")),
+  WEATHER_OBSERVATIONS_PATH: z.preprocess(
+    emptyToUndefined,
+    z.string().default("data/weather/observations/noaa-ghcnd-daily.jsonl")
+  ),
+  WEATHER_MARKET_SNAPSHOTS_PATH: z.preprocess(
+    emptyToUndefined,
+    z.string().default("data/weather/markets/polymarket-weather-snapshots.jsonl")
+  ),
+  WEATHER_FORECAST_SNAPSHOTS_PATH: z.preprocess(
+    emptyToUndefined,
+    z.string().default("data/weather/forecasts/provider-forecasts.jsonl")
+  ),
+  WEATHER_PREVIOUS_RUN_FORECASTS_PATH: z.preprocess(
+    emptyToUndefined,
+    z.string().default("data/weather/forecasts/openmeteo-previous-runs.jsonl")
+  ),
+  WEATHER_BACKTEST_RUNS_PATH: z.preprocess(
+    emptyToUndefined,
+    z.string().default("data/weather/backtests/weatheredge-runs.jsonl")
+  )
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;
@@ -63,10 +94,29 @@ export function loadConfig(overrides: Record<string, string | undefined> = {}) {
     },
     vistadex: {
       apiKey: parsed.VISTADEX_CLIENT_API_KEY,
+      appBaseUrl: parsed.VISTADEX_APP_URL,
       rpcUrl: parsed.VISTADEX_RPC_URL,
       positionsBaseUrl: parsed.VISTADEX_POSITIONS_API_URL,
       secretKey: parsed.VISTADEX_SECRET_KEY,
       keypairPath: parsed.VISTADEX_KEYPAIR_PATH
+    },
+    weather: {
+      openMeteoForecastUrl: parsed.OPEN_METEO_FORECAST_URL,
+      openMeteoPreviousRunsUrl: parsed.OPEN_METEO_PREVIOUS_RUNS_URL,
+      openMeteoGeocodingUrl: parsed.OPEN_METEO_GEOCODING_URL,
+      nwsApiUrl: parsed.NWS_API_URL,
+      nwsUserAgent: parsed.NWS_USER_AGENT,
+      hkoApiUrl: parsed.HKO_API_URL,
+      noaaCdoApiUrl: parsed.NOAA_CDO_API_URL,
+      noaaCdoToken: parsed.NOAA_CDO_TOKEN,
+      cacheDir: parsed.WEATHER_CACHE_DIR,
+      datasets: {
+        observationsPath: parsed.WEATHER_OBSERVATIONS_PATH,
+        marketSnapshotsPath: parsed.WEATHER_MARKET_SNAPSHOTS_PATH,
+        forecastSnapshotsPath: parsed.WEATHER_FORECAST_SNAPSHOTS_PATH,
+        previousRunForecastsPath: parsed.WEATHER_PREVIOUS_RUN_FORECASTS_PATH,
+        backtestRunsPath: parsed.WEATHER_BACKTEST_RUNS_PATH
+      }
     }
   };
 }

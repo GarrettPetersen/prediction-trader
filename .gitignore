@@ -5,6 +5,7 @@
 node_modules/
 dist/
 coverage/
+.cache/
 *.log
 *.tsbuildinfo
 
@@ -16,5 +17,7 @@ wallet.json
 
 data/trades/*.jsonl
 data/trades/*.jsonl.*
+data/weather/**/*.jsonl
+data/weather/**/*.jsonl.*
 
 .DS_Store

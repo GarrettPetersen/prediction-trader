@@ -20,6 +20,9 @@ live execution difficult to trigger by accident.
   Polymarket 1X2 soccer markets.
 - Predicts soccer scorelines with reusable Poisson/Monte Carlo score-model
   utilities, including exact scores, BTTS, and over/under totals.
+- Pulls RainBot-style weather-model inputs from public/user-accessible sources:
+  GFS, ECMWF, and UKMO via Open-Meteo; NWS for U.S. forecasts; HKO for Hong
+  Kong; and NOAA NCEI CDO for token-gated historical climatology.
 - Records executed trades/redemptions and backfilled venue state to a local
   JSONL ledger for audit and PnL reconstruction.
 - Requires explicit live-trading gates before any command can submit a trade.
@@ -112,6 +115,7 @@ Vistadex:
 
 ```bash
 VISTADEX_CLIENT_API_KEY=
+VISTADEX_APP_URL=https://www.app.vistadex.com
 VISTADEX_RPC_URL=https://api.mainnet-beta.solana.com
 VISTADEX_POSITIONS_API_URL=https://markets.vistadex.com
 VISTADEX_SECRET_KEY=
@@ -121,6 +125,35 @@ VISTADEX_KEYPAIR_PATH=
 For Vistadex, provide either `VISTADEX_SECRET_KEY` or `VISTADEX_KEYPAIR_PATH`.
 The SDK accepts a base64 secret key, a JSON array string, or a path to a Solana
 keypair JSON file.
+
+WeatherEdge:
+
+```bash
+OPEN_METEO_FORECAST_URL=https://api.open-meteo.com/v1/forecast
+OPEN_METEO_PREVIOUS_RUNS_URL=https://previous-runs-api.open-meteo.com/v1/forecast
+OPEN_METEO_GEOCODING_URL=https://geocoding-api.open-meteo.com/v1/
+NWS_API_URL=https://api.weather.gov
+NWS_USER_AGENT=prediction-trader/0.1 weatheredge
+HKO_API_URL=https://data.weather.gov.hk/weatherAPI/opendata/weather.php
+NOAA_CDO_API_URL=https://www.ncei.noaa.gov/cdo-web/api/v2
+NOAA_CDO_TOKEN=
+WEATHER_CACHE_DIR=.cache/weatheredge
+WEATHER_OBSERVATIONS_PATH=data/weather/observations/noaa-ghcnd-daily.jsonl
+WEATHER_MARKET_SNAPSHOTS_PATH=data/weather/markets/polymarket-weather-snapshots.jsonl
+WEATHER_FORECAST_SNAPSHOTS_PATH=data/weather/forecasts/provider-forecasts.jsonl
+WEATHER_PREVIOUS_RUN_FORECASTS_PATH=data/weather/forecasts/openmeteo-previous-runs.jsonl
+WEATHER_BACKTEST_RUNS_PATH=data/weather/backtests/weatheredge-runs.jsonl
+```
+
+Open-Meteo, NWS, and HKO do not require secrets for the basic pulls implemented
+here. NOAA NCEI CDO requires a free token, sent as the `token` header. Keep it
+local in `.env`; it is not needed for live forecast pulls. NOAA CDO station and
+daily-data responses are cached under `WEATHER_CACHE_DIR` so repeated scans do
+not burn quota fetching the same climatology dates. The three
+`WEATHER_*_PATH` dataset files are durable local JSONL stores for actual NOAA
+observations, Polymarket weather market snapshots, provider forecast snapshots,
+Open-Meteo previous-run forecasts for already-resolved dates, and WeatherEdge
+model runs; they are ignored by git.
 
 ## Commands
 
@@ -149,6 +182,273 @@ prints private keys or API secrets. In network mode it also checks Polymarket
 geoblocking, the Polymarket deposit wallet contract code, Polymarket CLOB
 collateral balance/allowances, and Vistadex USDC balance when a Vistadex client
 API key is configured.
+
+## WeatherEdge Sources
+
+RainBot says its weather engine uses GFS, ECMWF, UKMO, NWS, HKO for Hong Kong,
+and NOAA NCEI GHCND history for climatology. This repo's first WeatherEdge
+layer connects to those source families through public/user-accessible APIs:
+
+- `openmeteo_gfs`: Open-Meteo model `gfs_seamless`.
+- `openmeteo_ecmwf`: Open-Meteo model `ecmwf_ifs025`.
+- `openmeteo_ukmo`: Open-Meteo model `ukmo_seamless`.
+- `nws`: official U.S. National Weather Service `/points` plus hourly forecast
+  endpoint. U.S. locations only.
+- `hko`: Hong Kong Observatory open data, using `fnd` for 9-day forecast and
+  `rhrread` for current readings. Hong Kong only.
+- `noaa_ncei`: NOAA NCEI Climate Data Online `GHCND` daily summaries. Requires
+  `NOAA_CDO_TOKEN`. By default, the command auto-selects a nearby GHCND station
+  with `TMAX` coverage; use `--ncei-location` or `--ncei-station` to force a
+  known CDO id.
+
+Pull all applicable sources for Vancouver:
+
+```bash
+npm run weather:sources -- --city Vancouver --country CA --days 3
+```
+
+That should connect to the three Open-Meteo model families and skip NWS, HKO,
+and NOAA NCEI unless you pass the extra location/token inputs.
+
+Smoke-test NWS on a U.S. location:
+
+```bash
+npm run weather:sources -- \
+  --city "New York" \
+  --country US \
+  --days 2 \
+  --sources nws
+```
+
+Smoke-test HKO on Hong Kong:
+
+```bash
+npm run weather:sources -- \
+  --city "Hong Kong" \
+  --country HK \
+  --days 3 \
+  --sources hko
+```
+
+Use NOAA NCEI once you have a CDO token:
+
+```bash
+npm run weather:sources -- \
+  --city Vancouver \
+  --country CA \
+  --sources noaa_ncei
+```
+
+If `--history-date` is omitted, the command uses the selected station's latest
+available date because NOAA daily summaries can lag real time by a few days.
+Force a known station or CDO location when needed:
+
+```bash
+npm run weather:sources -- \
+  --city Vancouver \
+  --country CA \
+  --sources noaa_ncei \
+  --history-date 2026-06-11 \
+  --ncei-station GHCND:CA001108446
+```
+
+The command prints compact daily/hourly slices by default. Add `--raw` when you
+need full provider JSON for parser work.
+
+The NOAA CDO `/data` endpoint supports date ranges, multiple data types, and
+pagination, so a long station history can be fetched in bulk-ish pages. The
+current climatology implementation still requests the same calendar date for
+each prior year because that is usually fewer rows than pulling full years, and
+the local cache prevents repeat calls across runs. A future calibration job
+should use bulk date ranges when it needs dense historical series.
+
+### WeatherEdge Trading Pipeline
+
+The RainBot-style pipeline is CLI-first and review-first:
+
+1. Discover Polymarket weather events.
+2. Parse city, date, market type, and temperature outcome bins.
+3. Pull GFS, ECMWF, UKMO, NWS/HKO where applicable, plus NOAA NCEI history.
+4. Build a weighted consensus forecast.
+5. Blend in a 10-year same-calendar-date NOAA prior when available.
+6. Price each outcome with a Normal CDF.
+7. Compare fair probability to market prices, apply a dynamic edge threshold,
+   and size with quarter-Kelly capped at 15% of bankroll.
+8. Produce reviewable signals and paper-loop output.
+
+Discover active weather-temperature ladders:
+
+```bash
+npm run weather:scan -- --limit 50 --max-pages 4
+```
+
+Price one Polymarket weather event by event slug:
+
+```bash
+npm run weather:price -- \
+  --slug highest-temperature-in-vancouver-on-july-4-2026 \
+  --bankroll 100 \
+  --max-per-trade 5
+```
+
+Scan and rank candidate signals:
+
+```bash
+npm run weather:signals -- \
+  --limit 50 \
+  --max-pages 4 \
+  --max-events 8 \
+  --bankroll 100 \
+  --max-per-trade 5
+```
+
+Compute our edge on every parsed tomorrow weather-temperature market:
+
+```bash
+npm run weather:tomorrow -- \
+  --bankroll 100 \
+  --max-per-trade 5 \
+  --top 50
+```
+
+That command defaults to tomorrow in the local machine timezone, scans the
+Polymarket `weather` tag, filters to parsed daily high/low temperature ladders,
+prices each binary market, and prints a ranked edge table. Add `--all` to print
+every priced row, `--signals-only` to show only edges above the dynamic
+threshold, or `--date YYYY-MM-DD` with `weather:edges` to inspect another day:
+
+```bash
+npm run weather:edges -- \
+  --date 2026-07-04 \
+  --bankroll 100 \
+  --max-per-trade 5 \
+  --all
+```
+
+For a fast forecast-only universe scan, skip NOAA climatology:
+
+```bash
+npm run weather:tomorrow -- --no-climatology --signals-only
+```
+
+Run a paper signal loop:
+
+```bash
+npm run weather:run -- \
+  --paper \
+  --cycles 3 \
+  --interval-sec 300 \
+  --max-events 8 \
+  --bankroll 100 \
+  --max-per-trade 5
+```
+
+Backtest the NOAA climatology prior for a city/date:
+
+```bash
+npm run weather:backtest -- \
+  --city Vancouver \
+  --country CA \
+  --date 2026-07-04 \
+  --measure temperature_high \
+  --years 10 \
+  --threshold 24
+```
+
+### WeatherEdge Dataset Loop
+
+The cache under `.cache/weatheredge` is an implementation detail: it prevents
+repeat API calls, but it is not a research dataset. For calibration and future
+backtests, write durable JSONL records under `data/weather/`.
+
+Collect actual daily NOAA observations for a station/date range:
+
+```bash
+npm run weather:dataset:observations -- \
+  --city Vancouver \
+  --country CA \
+  --start-date 2026-06-01 \
+  --end-date 2026-06-30 \
+  --ncei-station GHCND:CA001108446
+```
+
+Snapshot currently available Polymarket weather markets and prices:
+
+```bash
+npm run weather:dataset:markets -- \
+  --days-ahead 1 \
+  --limit 100 \
+  --max-pages 20
+```
+
+Snapshot provider forecasts for the latest saved market snapshot:
+
+```bash
+npm run weather:dataset:forecasts
+```
+
+That command reads the latest `WEATHER_MARKET_SNAPSHOTS_PATH`, groups it by
+city/date/measure, then saves per-provider forecast values from GFS, ECMWF,
+UKMO, NWS where applicable, and HKO where applicable. Each forecast record is
+keyed to the market snapshot timestamp so later backtests can join:
+
+```text
+market price at T + provider forecast at T + actual observed weather after resolution
+```
+
+Collect historical day-ahead forecasts for dates that have already happened:
+
+```bash
+npm run weather:dataset:previous-runs -- \
+  --start-date 2024-01-01 \
+  --end-date 2024-12-31 \
+  --lead-days 1 \
+  --sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo
+```
+
+This uses Open-Meteo's Previous Model Runs API, not the normal historical
+weather API. For each city/date/source/lead-time it stores the forecast value
+that the model predicted before valid time, such as `leadDays=1` for the value
+predicted roughly 24 hours earlier. That is the dataset to use for honest
+forecast-skill backtests against later NOAA observations.
+
+Save a WeatherEdge pricing run for later audit:
+
+```bash
+npm run weather:dataset:run -- \
+  --days-ahead 1 \
+  --bankroll 100 \
+  --max-per-trade 5 \
+  --max-events 25
+```
+
+Summarize the local dataset stores:
+
+```bash
+npm run weather:dataset:summary
+```
+
+The intended loop is: snapshot markets before trading, snapshot provider
+forecasts for the same market timestamp, save model runs when signals are
+generated, then collect NOAA observations after the relevant dates resolve. That
+gives us enough local evidence to measure forecast calibration, market edge,
+slippage, and realized outcomes.
+
+Current WeatherEdge limits:
+
+- Live auto-execution is intentionally disabled in `weather:run`. Use
+  `weather:signals` to inspect candidates, then place explicit reviewed orders
+  through venue-specific commands if trading is permitted.
+- The parser currently targets city daily high/low temperature ladders. Global
+  monthly temperature anomaly and record-rank markets are intentionally skipped.
+- Polymarket weather discovery uses the public Gamma `weather` tag and keyword
+  shape checks. If Gamma tagging changes, use `--include-unparsed` to inspect
+  misses.
+- Forecast pricing does not yet use live observed running highs except for the
+  HKO current reading surface exposed by `weather:sources`.
+- Backtesting currently audits the NOAA climatology prior plus any WeatherEdge
+  runs and market snapshots we explicitly save. Historical forecast archive
+  calibration is still the next step before trusting automated weather trades.
 
 ## Football Edge Model
 
@@ -380,6 +680,14 @@ The SDK sends this key as `Authorization: Bearer <key>` to
 `https://server.vistadex.com` and uses it as the `apiKey` query parameter for
 user websocket updates.
 
+Historical Vistadex profile activity is separate from the SDK/RFQ flow. The
+public profile page at `https://www.app.vistadex.com/profile/<username>` calls
+`/api/public/user?username=<username>` and then pages
+`/api/public/order-history?wallet=<wallet>&limit=<n>`. Those read-only profile
+endpoints are used by `vistadex:activity` and `ledger:backfill`; they do not
+require `VISTADEX_CLIENT_API_KEY` when you provide `--username` or `--wallet`.
+`VISTADEX_APP_URL` controls the base URL for those public web-app endpoints.
+
 Then create a dedicated Solana hot wallet for the agent:
 
 ```bash
@@ -508,6 +816,15 @@ List current Vistadex positions:
 npm run vistadex:positions
 ```
 
+Fetch public Vistadex profile activity without submitting anything:
+
+```bash
+npm run vistadex:activity -- --username tongbao --limit 25
+```
+
+If `--username` and `--wallet` are omitted, the command derives the wallet
+address from `VISTADEX_SECRET_KEY` or `VISTADEX_KEYPAIR_PATH`.
+
 Request a quote without signing or submitting:
 
 ```bash
@@ -601,22 +918,47 @@ Live `polymarket:order`, `polymarket:redeem`, `vistadex:trade`, and
 preview, execution response, stable venue IDs when available, and a dedupe key.
 The default file is `data/trades/ledger.jsonl`, which is ignored by git.
 
-Backfill the ledger from venue APIs:
+Update the ledger from venue APIs:
+
+```bash
+npm run ledger:update
+```
+
+This is the normal audit command to run before and after a trading session. It
+is safe to rerun: records dedupe by venue-provided IDs, stable position snapshot
+keys, and daily cash snapshot keys. Current coverage:
+
+- Polymarket CLOB fills via the authenticated CLOB `getTrades` endpoint.
+- Polymarket current and redeemable positions via the data API.
+- Polymarket pUSD/collateral cash balance from the Polygon deposit wallet.
+- Vistadex public profile activity via `/api/public/order-history`, including
+  historical trades and redemptions.
+- Vistadex current positions via the published SDK.
+- Vistadex USDC cash balance from the wallet's Solana token account.
+
+The published Vistadex SDK still does not expose historical user fills directly;
+the ledger uses the Vistadex web app's public profile activity endpoint for
+that history and the SDK positions endpoint for current position snapshots.
+
+Useful update variants:
+
+```bash
+npm run ledger:update -- --venue polymarket
+npm run ledger:update -- --venue vistadex
+npm run ledger:update -- --no-cash
+npm run ledger:update -- --no-positions
+npm run ledger:update -- --activity-limit 100 --max-pages 5
+```
+
+`ledger:update` continues if one venue or stage fails, and prints any errors in
+the report. That lets a Vistadex cash snapshot still land even if Polymarket is
+temporarily blocked, or vice versa.
+
+`ledger:backfill` remains available for lower-level historical pulls:
 
 ```bash
 npm run ledger:backfill
 ```
-
-Backfill is safe to rerun. It dedupes by venue-provided IDs or stable position
-snapshot keys. Current coverage:
-
-- Polymarket CLOB fills via the authenticated CLOB `getTrades` endpoint.
-- Polymarket current and redeemable positions via the data API.
-- Vistadex current positions via the published SDK.
-
-The published Vistadex SDK does not expose historical user fills, so Vistadex
-pre-ledger history can only be reconstructed from current positions and future
-local execution records.
 
 Inspect the local ledger:
 
@@ -640,7 +982,7 @@ Before an agent is allowed to submit trades:
 
 1. Confirm `.env` exists and secrets are local-only.
 2. Run `npm run build` and `npm test`.
-3. Run `npm run ledger:backfill` if this is a new checkout or the ledger may be
+3. Run `npm run ledger:update` if this is a new checkout or the ledger may be
    stale.
 4. Confirm bankroll and per-trade limits.
 5. Confirm the trading mandate:
@@ -655,8 +997,8 @@ Before an agent is allowed to submit trades:
 6. Run the command once without `--execute`.
 7. Read the preview output.
 8. Only then rerun with `PREDICTION_TRADER_LIVE=1` and `--execute`.
-9. Run `npm run ledger:summary` after trading to confirm the execution was
-   recorded.
+9. Run `npm run ledger:update` and then `npm run ledger:summary` after trading
+   to confirm the execution and cash state were recorded.
 
 Suggested first live test:
 
@@ -675,8 +1017,8 @@ PREDICTION_TRADER_LIVE=1 npm run vistadex:trade -- \
 - No strategy loop yet.
 - Polymarket event lookup can fetch outcome token IDs and orderbook tops by
   slug, but there is no broad market screener yet.
-- Position snapshots and paired-position cleanup exist, but there is no full
-  portfolio reconciliation or daily-loss accounting yet.
+- Position, fill, redemption, and cash snapshots exist, but there is no full
+  tax-grade portfolio reconciliation or daily-loss accounting yet.
 - The trade ledger records executions and backfilled state, but it is not yet a
   full tax-grade accounting system or realized/unrealized PnL reconciler.
 - No automatic position exit rules yet.

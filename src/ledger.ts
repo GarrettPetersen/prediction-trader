@@ -12,7 +12,7 @@ import type {
 } from "./types.js";
 
 export type LedgerSource = "execution" | "backfill" | "manual";
-export type LedgerAction = "order" | "redeem" | "fill" | "position_snapshot";
+export type LedgerAction = "order" | "redeem" | "fill" | "position_snapshot" | "cash_snapshot";
 export type LedgerTicket = PolymarketOrderTicket | PolymarketRedeemTicket | VistadexTradeTicket;
 
 export interface LedgerMarketRef {
@@ -28,6 +28,7 @@ export interface LedgerMarketRef {
 }
 
 export interface LedgerIds {
+  activityId?: string;
   orderId?: string;
   tradeId?: string;
   transactionHash?: string;
