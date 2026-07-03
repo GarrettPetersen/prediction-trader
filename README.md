@@ -412,6 +412,24 @@ that the model predicted before valid time, such as `leadDays=1` for the value
 predicted roughly 24 hours earlier. That is the dataset to use for honest
 forecast-skill backtests against later NOAA observations.
 
+Run a resolved-market strategy backtest for a specific date:
+
+```bash
+npm run weather:backtest:markets -- \
+  --date 2026-06-30 \
+  --lead-days 1 \
+  --bankroll 100 \
+  --min-edge 0.20
+```
+
+That command fetches resolved Polymarket weather binaries for the date, joins
+their historical price just before the decision time to local Open-Meteo
+previous-run forecasts and NOAA actuals, then splits the bankroll equally across
+every side whose calibrated probability edge exceeds `--min-edge`. It is useful
+for research, but still assumes fills at historical YES prices, infers NO prices
+as `1 - YES`, and does not yet model order-book depth, spread, fees, or
+liquidity caps.
+
 Save a WeatherEdge pricing run for later audit:
 
 ```bash
@@ -446,9 +464,10 @@ Current WeatherEdge limits:
   misses.
 - Forecast pricing does not yet use live observed running highs except for the
   HKO current reading surface exposed by `weather:sources`.
-- Backtesting currently audits the NOAA climatology prior plus any WeatherEdge
-  runs and market snapshots we explicitly save. Historical forecast archive
-  calibration is still the next step before trusting automated weather trades.
+- Market backtests now use Open-Meteo previous-run forecasts plus NOAA actuals,
+  but international city settlement coverage is still incomplete and execution
+  modeling is intentionally conservative research scaffolding, not a fill
+  simulator.
 
 ## Football Edge Model
 

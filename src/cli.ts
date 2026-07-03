@@ -83,6 +83,10 @@ import {
   type WeatherEdgeRow
 } from "./weatherEdges.js";
 import {
+  runWeatherMarketBacktest,
+  type WeatherBacktestTrade
+} from "./weatherBacktest.js";
+import {
   collectWeatherBacktestRunDataset,
   collectWeatherForecastSnapshotsDataset,
   collectWeatherMarketSnapshotsDataset,
@@ -547,6 +551,31 @@ function compactWeatherPreviousRunForecastRecord(record: WeatherPreviousRunForec
   };
 }
 
+function compactWeatherBacktestTrade(trade: WeatherBacktestTrade) {
+  return {
+    side: trade.side,
+    won: trade.won,
+    pnlUsd: round(trade.pnlUsd, 2),
+    stakeUsd: round(trade.stakeUsd, 2),
+    payoutUsd: round(trade.payoutUsd, 2),
+    edge: round(trade.edge),
+    fair: round(trade.fair),
+    price: round(trade.price),
+    city: trade.city,
+    measure: trade.measure,
+    outcomeLabel: trade.outcomeLabel,
+    actualC: round(trade.actualC, 2),
+    forecastMeanC: round(trade.forecastMeanC, 2),
+    calibratedMeanC: round(trade.calibratedMeanC, 2),
+    sigmaC: round(trade.sigmaC, 2),
+    marketSlug: trade.marketSlug,
+    question: trade.question,
+    decisionTime: trade.decisionTime,
+    priceTime: trade.priceTime,
+    priceAgeHours: round(trade.priceAgeHours, 2)
+  };
+}
+
 function compactWeatherPricingReport(report: WeatherPricingReport) {
   return {
     group: report.group,
@@ -743,6 +772,7 @@ Commands:
   weather:edges [--date YYYY-MM-DD | --days-ahead N] [--top N | --all] [--signals-only] [--no-climatology] [--concurrency N]
   weather:tomorrow [--top N | --all] [--signals-only] [--no-climatology] [--concurrency N]
   weather:backtest --city CITY [--country CODE] --date YYYY-MM-DD [--measure temperature_high|temperature_low] [--years N] [--threshold N]
+  weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N]
   weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N]
   weather:dataset:observations (--city CITY [--country CODE] | --latitude N --longitude N) --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--ncei-station ID | --ncei-location ID] [--path PATH]
   weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--path PATH]
@@ -967,6 +997,47 @@ async function run(): Promise<void> {
       },
       backtest: backtestWeatherClimatologySamples(samples, numberArg(args, "threshold", false))
     });
+    return;
+  }
+
+  if (command === "weather:backtest:markets") {
+    const report = await runWeatherMarketBacktest(config, {
+      date: requiredStringArg(args, "date"),
+      leadDays: numberArg(args, "lead-days", false),
+      bankrollUsd: numberArg(args, "bankroll", false),
+      minEdge: numberArg(args, "min-edge", false),
+      sources: listArg(args, "sources", false),
+      limit: numberArg(args, "limit", false),
+      maxPages: numberArg(args, "max-pages", false),
+      maxStalenessHours: numberArg(args, "max-staleness-hours", false)
+    });
+    const top = Math.max(1, Math.trunc(numberArg(args, "top", false) ?? 25));
+    print(args.raw === true
+      ? report
+      : {
+        date: report.date,
+        leadDays: report.leadDays,
+        bankrollUsd: report.bankrollUsd,
+        minEdge: report.minEdge,
+        strategy: report.strategy,
+        calibration: report.calibration.map((item) => ({
+          measure: item.measure,
+          samples: item.samples,
+          biasC: round(item.biasC, 3),
+          sigmaC: round(item.sigmaC, 3),
+          meanAbsoluteErrorC: round(item.meanAbsoluteErrorC, 3)
+        })),
+        summary: {
+          ...report.summary,
+          stakeUsd: round(report.summary.stakeUsd, 2),
+          payoutUsd: round(report.summary.payoutUsd, 2),
+          pnlUsd: round(report.summary.pnlUsd, 2),
+          roi: round(report.summary.roi, 4)
+        },
+        displayedTrades: Math.min(top, report.trades.length),
+        omittedTrades: Math.max(0, report.trades.length - top),
+        trades: report.trades.slice(0, top).map(compactWeatherBacktestTrade)
+      });
     return;
   }
 
