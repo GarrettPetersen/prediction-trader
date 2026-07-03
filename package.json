@@ -31,6 +31,7 @@
     "weather:tomorrow": "node --import tsx src/cli.ts weather:tomorrow",
     "weather:backtest": "node --import tsx src/cli.ts weather:backtest",
     "weather:backtest:markets": "node --import tsx src/cli.ts weather:backtest:markets",
+    "weather:resolution-audit": "node --import tsx src/cli.ts weather:resolution-audit",
     "weather:run": "node --import tsx src/cli.ts weather:run",
     "weather:dataset:observations": "node --import tsx src/cli.ts weather:dataset:observations",
     "weather:dataset:markets": "node --import tsx src/cli.ts weather:dataset:markets",

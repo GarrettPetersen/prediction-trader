@@ -51,6 +51,7 @@ export interface WeatherMarketCandidate {
   eventEndDate?: string;
   marketSlug: string;
   question: string;
+  resolutionSource?: string;
   conditionId?: string;
   active: boolean;
   closed: boolean;
@@ -80,6 +81,8 @@ export interface WeatherScanOptions {
   maxPages?: number;
   includeExpired?: boolean;
   includeUnparsed?: boolean;
+  active?: boolean;
+  closed?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -264,6 +267,7 @@ function normalizeWeatherMarketCandidate(
     eventEndDate,
     marketSlug,
     question,
+    resolutionSource: stringValue(market.resolutionSource),
     conditionId: stringValue(market.conditionId),
     active: boolValue(market.active),
     closed: boolValue(market.closed),
@@ -307,12 +311,17 @@ export async function fetchPolymarketWeatherMarkets(
   const maxPages = Math.min(Math.max(Math.trunc(options.maxPages ?? 4), 1), 20);
   const groups = new Map<string, WeatherMarketGroup>();
   const now = Date.now();
+  const closed = options.closed ?? false;
 
   for (let page = 0; page < maxPages; page += 1) {
     const url = new URL("/events", POLYMARKET_GAMMA_BASE_URL);
     url.searchParams.set("tag_slug", "weather");
-    url.searchParams.set("active", "true");
-    url.searchParams.set("closed", "false");
+    url.searchParams.set("closed", String(closed));
+    if (options.active !== undefined) {
+      url.searchParams.set("active", String(options.active));
+    } else if (!closed) {
+      url.searchParams.set("active", "true");
+    }
     url.searchParams.set("limit", String(limit));
     url.searchParams.set("offset", String(page * limit));
     url.searchParams.set("order", "endDate");
@@ -335,7 +344,11 @@ export async function fetchPolymarketWeatherMarkets(
           if (options.includeUnparsed) eventUnparsed.push(normalized.unparsed);
           continue;
         }
-        if (!normalized.active || normalized.closed || normalized.acceptingOrders === false) continue;
+        if (closed) {
+          if (!normalized.closed) continue;
+        } else if (!normalized.active || normalized.closed || normalized.acceptingOrders === false) {
+          continue;
+        }
 
         const key = groupKey(normalized);
         const existing = groups.get(key) ?? {

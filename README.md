@@ -419,16 +419,56 @@ npm run weather:backtest:markets -- \
   --date 2026-06-30 \
   --lead-days 1 \
   --bankroll 100 \
-  --min-edge 0.20
+  --min-edge 0.20 \
+  --min-trade-price 0.05 \
+  --calibration-half-life-days 365 \
+  --city-bias-prior-weight 30
 ```
 
 That command fetches resolved Polymarket weather binaries for the date, joins
 their historical price just before the decision time to local Open-Meteo
-previous-run forecasts and NOAA actuals, then splits the bankroll equally across
-every side whose calibrated probability edge exceeds `--min-edge`. It is useful
-for research, but still assumes fills at historical YES prices, infers NO prices
-as `1 - YES`, and does not yet model order-book depth, spread, fees, or
-liquidity caps.
+previous-run forecasts, settles PnL from Polymarket's final resolved outcome,
+and splits the bankroll equally across every side whose calibrated probability
+edge exceeds `--min-edge`. NOAA actuals still calibrate forecast errors and are
+shown as diagnostics when available, but they are not used as a proxy for market
+settlement. It is useful for research, but still assumes fills at historical YES
+prices, infers NO prices as `1 - YES`, and does not yet model order-book depth,
+spread, fees, or liquidity caps. Use `--min-trade-price` to exclude very cheap
+contracts while we are still using last-trade/price-history fills instead of
+full order-book simulation.
+
+The market backtest calibrates the forecast before pricing bins:
+
+- source-specific bias and reliability are learned from prior forecast errors;
+- recent errors count more than older errors via `--calibration-half-life-days`;
+- city-level residual bias is learned with shrinkage controlled by
+  `--city-bias-prior-weight`, so thin cities stay close to the global bias.
+
+Audit resolution sources before trusting a weather signal:
+
+```bash
+npm run weather:resolution-audit -- \
+  --date 2026-07-04 \
+  --status active \
+  --top 50
+```
+
+This command compares each Polymarket weather event's exposed resolution source
+against the city-level forecast target we currently use. Wunderground
+station-based markets such as `KLAX`, `KSEA`, or `KLGA` are flagged when the
+city geocode is materially away from the settlement station. Treat
+`CITY_FORECAST_MISMATCH`, `STATION_COORDS_MISSING`, and
+`MISSING_RESOLUTION_SOURCE` rows as manual-review blockers before trading.
+
+Live weather pricing is now strict by default: if a Polymarket weather market
+exposes a Wunderground station such as `KLAX`, `KATL`, or `EHAM`, the forecast
+is pulled for that station's coordinates instead of the display city. The
+pricing output includes `resolution.matched`, `stationId`, and
+`cityDistanceKm` for every signal. Markets without a usable station resolution
+source are not priced unless you explicitly pass `--allow-city-forecast`.
+Historical previous-run backtests should be refreshed with station-coordinate
+datasets before being treated as production evidence; old rows collected by
+city name are useful only for rough model development.
 
 Save a WeatherEdge pricing run for later audit:
 

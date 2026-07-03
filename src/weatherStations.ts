@@ -1,0 +1,197 @@
+import type { WeatherLocation } from "./weatherEdge.js";
+import type { WeatherMarketGroup } from "./weatherMarkets.js";
+
+export interface ParsedResolutionSource {
+  raw?: string;
+  provider: "wunderground" | "missing" | "unknown";
+  stationId?: string;
+  locationPath?: string;
+  note?: string;
+}
+
+export interface WeatherStationInfo {
+  id: string;
+  icaoId?: string;
+  iataId?: string;
+  site?: string;
+  latitude: number;
+  longitude: number;
+  state?: string;
+  country?: string;
+}
+
+export interface WeatherStationForecastTarget {
+  resolutionSource?: string;
+  resolution: ParsedResolutionSource;
+  station?: WeatherStationInfo;
+  location?: WeatherLocation;
+  matched: boolean;
+  note?: string;
+}
+
+interface AviationWeatherStationRaw {
+  id?: unknown;
+  icaoId?: unknown;
+  iataId?: unknown;
+  site?: unknown;
+  lat?: unknown;
+  lon?: unknown;
+  state?: unknown;
+  country?: unknown;
+}
+
+const stationCache = new Map<string, Promise<WeatherStationInfo | undefined>>();
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+export function parseResolutionSource(source: string | undefined): ParsedResolutionSource {
+  if (!source) return { provider: "missing" };
+
+  let url: URL;
+  try {
+    url = new URL(source);
+  } catch {
+    return {
+      raw: source,
+      provider: "unknown",
+      note: "Resolution source is not a parseable URL."
+    };
+  }
+
+  if (!/wunderground\.com$/i.test(url.hostname) && !/\.wunderground\.com$/i.test(url.hostname)) {
+    return {
+      raw: source,
+      provider: "unknown",
+      note: `Unsupported resolution host ${url.hostname}.`
+    };
+  }
+
+  const segments = url.pathname.split("/").filter(Boolean);
+  const dailyIndex = segments.findIndex((segment) => segment.toLowerCase() === "daily");
+  const stationId = segments.at(-1)?.toUpperCase();
+  if (dailyIndex < 0 || !stationId || stationId === "DAILY") {
+    return {
+      raw: source,
+      provider: "wunderground",
+      note: "Wunderground URL did not include the expected /history/daily/.../STATION shape."
+    };
+  }
+
+  return {
+    raw: source,
+    provider: "wunderground",
+    stationId,
+    locationPath: segments.slice(dailyIndex + 1, -1).join("/")
+  };
+}
+
+export function firstResolutionSource(group: WeatherMarketGroup): string | undefined {
+  return group.markets.find((market) => market.resolutionSource)?.resolutionSource;
+}
+
+export function distanceKm(
+  a: { latitude: number; longitude: number },
+  b: { latitude: number; longitude: number }
+): number {
+  const earthRadiusKm = 6371;
+  const toRad = (value: number) => value * Math.PI / 180;
+  const deltaLat = toRad(b.latitude - a.latitude);
+  const deltaLon = toRad(b.longitude - a.longitude);
+  const lat1 = toRad(a.latitude);
+  const lat2 = toRad(b.latitude);
+  const h = Math.sin(deltaLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLon / 2) ** 2;
+  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+export async function fetchWeatherStationInfo(stationId: string): Promise<WeatherStationInfo | undefined> {
+  const cached = stationCache.get(stationId);
+  if (cached) return cached;
+
+  const request = (async () => {
+    const url = new URL("https://aviationweather.gov/api/data/stationinfo");
+    url.searchParams.set("ids", stationId);
+    url.searchParams.set("format", "json");
+
+    const response = await fetch(url);
+    if (!response.ok) return undefined;
+    const raw = await response.json();
+    const first = Array.isArray(raw) ? raw[0] as AviationWeatherStationRaw | undefined : undefined;
+    if (!first) return undefined;
+    const latitude = numberValue(first.lat);
+    const longitude = numberValue(first.lon);
+    if (latitude === undefined || longitude === undefined) return undefined;
+
+    return {
+      id: stringValue(first.id) ?? stationId,
+      icaoId: stringValue(first.icaoId),
+      iataId: stringValue(first.iataId),
+      site: stringValue(first.site),
+      latitude,
+      longitude,
+      state: stringValue(first.state),
+      country: stringValue(first.country)
+    };
+  })();
+  stationCache.set(stationId, request);
+  return request;
+}
+
+export function stationWeatherLocation(
+  station: WeatherStationInfo,
+  options: { marketCity: string; timezone?: string }
+): WeatherLocation {
+  return {
+    name: `${options.marketCity} (${station.id})`,
+    latitude: station.latitude,
+    longitude: station.longitude,
+    countryCode: station.country,
+    country: station.country,
+    admin1: station.state,
+    timezone: options.timezone
+  };
+}
+
+export async function resolveStationForecastTarget(
+  group: WeatherMarketGroup
+): Promise<WeatherStationForecastTarget> {
+  const resolutionSource = firstResolutionSource(group);
+  const resolution = parseResolutionSource(resolutionSource);
+  if (resolution.provider !== "wunderground" || !resolution.stationId) {
+    return {
+      resolutionSource,
+      resolution,
+      matched: false,
+      note: resolution.note ?? (
+        resolution.provider === "missing"
+          ? "No resolution source was exposed by Gamma."
+          : "Resolution source is not a supported Wunderground station URL."
+      )
+    };
+  }
+
+  const station = await fetchWeatherStationInfo(resolution.stationId);
+  if (!station) {
+    return {
+      resolutionSource,
+      resolution,
+      matched: false,
+      note: `Could not resolve coordinates for station ${resolution.stationId}.`
+    };
+  }
+
+  return {
+    resolutionSource,
+    resolution,
+    station,
+    location: stationWeatherLocation(station, { marketCity: group.city }),
+    matched: true
+  };
+}

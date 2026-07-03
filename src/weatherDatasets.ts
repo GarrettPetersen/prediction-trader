@@ -74,6 +74,7 @@ export interface WeatherMarketSnapshotRecord {
   measure: WeatherMeasure;
   marketSlug: string;
   question: string;
+  resolutionSource?: string;
   conditionId?: string;
   active: boolean;
   closed: boolean;
@@ -412,6 +413,7 @@ export function buildWeatherMarketSnapshotRecords(
     measure: market.parsed.measure,
     marketSlug: market.marketSlug,
     question: market.question,
+    resolutionSource: market.resolutionSource,
     conditionId: market.conditionId,
     active: market.active,
     closed: market.closed,

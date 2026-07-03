@@ -15,6 +15,9 @@ export interface WeatherMarketBacktestOptions {
   maxPages?: number;
   limit?: number;
   maxStalenessHours?: number;
+  calibrationHalfLifeDays?: number;
+  cityBiasPriorWeight?: number;
+  minTradePrice?: number;
 }
 
 export interface WeatherCalibrationSummary {
@@ -23,6 +26,10 @@ export interface WeatherCalibrationSummary {
   biasC: number;
   sigmaC: number;
   meanAbsoluteErrorC: number;
+  halfLifeDays: number;
+  cityBiases: number;
+  sourceWeights: Record<string, number>;
+  sourceBiasC: Record<string, number>;
 }
 
 export interface WeatherBacktestTrade {
@@ -41,8 +48,9 @@ export interface WeatherBacktestTrade {
   forecastMeanC: number;
   calibratedMeanC: number;
   sigmaC: number;
-  actualC: number;
-  actualYes: boolean;
+  actualC?: number;
+  resolvedYes: boolean;
+  proxyActualYes?: boolean;
   won: boolean;
   stakeUsd: number;
   payoutUsd: number;
@@ -64,7 +72,9 @@ export interface WeatherMarketBacktestReport {
     binaryMarkets: number;
     skippedNoForecast: number;
     skippedNoActual: number;
+    skippedNoSettlement: number;
     skippedNoPrice: number;
+    scoredMarkets: number;
     candidates: number;
     wins: number;
     losses: number;
@@ -72,6 +82,8 @@ export interface WeatherMarketBacktestReport {
     payoutUsd: number;
     pnlUsd: number;
     roi: number;
+    brierScore?: number;
+    candidateBrierScore?: number;
   };
   trades: WeatherBacktestTrade[];
 }
@@ -84,6 +96,8 @@ interface ClosedWeatherMarket {
   question: string;
   parsed: ParsedWeatherMarket;
   yesTokenId?: string;
+  resolutionSource?: string;
+  resolvedYes?: boolean;
 }
 
 interface PricePoint {
@@ -93,6 +107,7 @@ interface PricePoint {
 
 interface ForecastAggregate {
   meanC: number;
+  rawMeanC: number;
   sourceCount: number;
 }
 
@@ -106,7 +121,41 @@ interface Calibration {
   sigmaC: number;
   meanAbsoluteErrorC: number;
   samples: number;
+  halfLifeDays: number;
+  cityBiasPriorWeight: number;
+  cityBiases: Map<string, { biasC: number; samples: number; effectiveWeight: number }>;
+  sourceCalibrations: Map<string, {
+    biasC: number;
+    sigmaC: number;
+    meanAbsoluteErrorC: number;
+    samples: number;
+    effectiveWeight: number;
+    ensembleWeight: number;
+  }>;
 }
+
+type SourceCalibration = Calibration["sourceCalibrations"] extends Map<string, infer T> ? T : never;
+
+interface SourceForecastValue {
+  source: string;
+  valueC: number;
+}
+
+interface ResidualSample {
+  cityKey: string;
+  date: string;
+  residualC: number;
+  weight: number;
+}
+
+interface WeightedValue {
+  value: number;
+  weight: number;
+}
+
+const DEFAULT_CALIBRATION_HALF_LIFE_DAYS = 365;
+const DEFAULT_CITY_BIAS_PRIOR_WEIGHT = 30;
+const SOURCE_CALIBRATION_PRIOR_SAMPLES = 30;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -154,6 +203,36 @@ function stdDev(values: number[]): number {
   return Math.sqrt(values.reduce((sum, value) => sum + (value - avg) ** 2, 0) / values.length);
 }
 
+function weightedMean(values: WeightedValue[]): number {
+  const weightTotal = values.reduce((sum, item) => sum + item.weight, 0);
+  if (weightTotal <= 0) return mean(values.map((item) => item.value));
+  return values.reduce((sum, item) => sum + item.value * item.weight, 0) / weightTotal;
+}
+
+function weightedStdDev(values: WeightedValue[], center = weightedMean(values)): number {
+  const weightTotal = values.reduce((sum, item) => sum + item.weight, 0);
+  if (weightTotal <= 0) return stdDev(values.map((item) => item.value));
+  return Math.sqrt(values.reduce((sum, item) => sum + ((item.value - center) ** 2) * item.weight, 0) / weightTotal);
+}
+
+function weightedMeanAbsolute(values: WeightedValue[]): number {
+  const weightTotal = values.reduce((sum, item) => sum + item.weight, 0);
+  if (weightTotal <= 0) return mean(values.map((item) => Math.abs(item.value)));
+  return values.reduce((sum, item) => sum + Math.abs(item.value) * item.weight, 0) / weightTotal;
+}
+
+function daysBetween(olderDate: string, newerDate: string): number {
+  const older = Date.parse(`${olderDate}T00:00:00Z`);
+  const newer = Date.parse(`${newerDate}T00:00:00Z`);
+  if (!Number.isFinite(older) || !Number.isFinite(newer)) return 0;
+  return Math.max(0, (newer - older) / 86_400_000);
+}
+
+function recencyWeight(date: string, targetDate: string, halfLifeDays: number): number {
+  const halfLife = Math.max(1, halfLifeDays);
+  return 0.5 ** (daysBetween(date, targetDate) / halfLife);
+}
+
 function actualValue(actual: ActualIndexValue | undefined, measure: WeatherMeasure): number | undefined {
   if (!actual) return undefined;
   return measure === "temperature_high" ? actual.maxTempC : actual.minTempC;
@@ -163,6 +242,20 @@ function marketResolvesYes(parsed: ParsedWeatherMarket, actualC: number): boolea
   const lower = parsed.outcome.lowerTempC;
   const upper = parsed.outcome.upperTempC;
   return (lower === undefined || actualC >= lower) && (upper === undefined || actualC < upper);
+}
+
+function parseResolvedYes(outcomesRaw: unknown, outcomePricesRaw: unknown): boolean | undefined {
+  const outcomes = parseGammaList(outcomesRaw);
+  const prices = parseGammaList(outcomePricesRaw).map((price) => Number(price));
+  const yesIndex = outcomes.findIndex((outcome) => outcome.toLowerCase() === "yes");
+  if (yesIndex < 0 || prices.length <= yesIndex) return undefined;
+  if (!prices.every((price) => Number.isFinite(price))) return undefined;
+
+  const yesPrice = prices[yesIndex];
+  const maxPrice = Math.max(...prices);
+  const minPrice = Math.min(...prices);
+  if (maxPrice < 0.99 || minPrice > 0.01) return undefined;
+  return yesPrice >= 0.99;
 }
 
 function bestEntryPriceAtOrBefore(
@@ -238,7 +331,9 @@ async function fetchClosedWeatherMarkets(date: string, options: { limit: number;
           marketSlug,
           question,
           parsed,
-          yesTokenId: yesIndex >= 0 ? tokenIds[yesIndex] : undefined
+          yesTokenId: yesIndex >= 0 ? tokenIds[yesIndex] : undefined,
+          resolutionSource: stringValue(marketRaw.resolutionSource),
+          resolvedYes: parseResolvedYes(marketRaw.outcomes, marketRaw.outcomePrices)
         });
       }
     }
@@ -278,60 +373,184 @@ function buildActualIndex(records: WeatherObservationRecord[]): Map<string, Actu
   return index;
 }
 
-function buildForecastIndex(
+function buildForecastValueIndex(
   records: WeatherPreviousRunForecastRecord[],
   options: { leadDays: number; sources: string[] }
-): Map<string, ForecastAggregate> {
-  const byKey = new Map<string, number[]>();
+): Map<string, SourceForecastValue[]> {
+  const byKey = new Map<string, Map<string, SourceForecastValue>>();
   const sourceSet = new Set(options.sources);
   for (const record of records) {
     if (!record.ok || record.valueC === undefined || record.leadDays !== options.leadDays) continue;
     if (!sourceSet.has(record.source)) continue;
     const key = forecastKey(record.city, record.date, record.measure);
-    const values = byKey.get(key) ?? [];
-    values.push(record.valueC);
+    const values = byKey.get(key) ?? new Map<string, SourceForecastValue>();
+    values.set(record.source, { source: record.source, valueC: record.valueC });
     byKey.set(key, values);
   }
 
-  return new Map([...byKey.entries()].map(([key, values]) => [key, {
-    meanC: mean(values),
-    sourceCount: values.length
-  }]));
+  return new Map([...byKey.entries()].map(([key, values]) => [key, [...values.values()]]));
 }
 
 function calibrateByMeasure(
-  forecastIndex: Map<string, ForecastAggregate>,
+  forecastValuesByKey: Map<string, SourceForecastValue[]>,
   actualIndex: Map<string, ActualIndexValue>,
-  targetDate: string
+  targetDate: string,
+  options: { halfLifeDays: number; cityBiasPriorWeight: number }
 ): Map<WeatherMeasure, Calibration> {
-  const residuals: Record<WeatherMeasure, number[]> = {
+  const sourceResiduals: Record<WeatherMeasure, Map<string, WeightedValue[]>> = {
+    temperature_high: new Map(),
+    temperature_low: new Map()
+  };
+  const sourceResidualPool: Record<WeatherMeasure, WeightedValue[]> = {
     temperature_high: [],
     temperature_low: []
   };
 
-  for (const [key, forecast] of forecastIndex.entries()) {
+  for (const [key, sourceValues] of forecastValuesByKey.entries()) {
     const [cityKey, date, measureRaw] = key.split("|");
     if (date >= targetDate) continue;
     const measure = measureRaw as WeatherMeasure;
     const actual = actualValue(actualIndex.get(`${cityKey}|${date}`), measure);
     if (actual === undefined) continue;
-    residuals[measure].push(actual - forecast.meanC);
+    const weight = recencyWeight(date, targetDate, options.halfLifeDays);
+    for (const sourceValue of sourceValues) {
+      const residual = actual - sourceValue.valueC;
+      const sourceItems = sourceResiduals[measure].get(sourceValue.source) ?? [];
+      sourceItems.push({ value: residual, weight });
+      sourceResiduals[measure].set(sourceValue.source, sourceItems);
+      sourceResidualPool[measure].push({ value: residual, weight });
+    }
   }
 
   return new Map((["temperature_high", "temperature_low"] as const).map((measure) => {
-    const values = residuals[measure];
-    if (values.length === 0) {
-      return [measure, { samples: 0, biasC: 0, sigmaC: 2.5, meanAbsoluteErrorC: 2.5 }];
+    const sourcePool = sourceResidualPool[measure];
+    const fallbackSourceBias = sourcePool.length > 0 ? weightedMean(sourcePool) : 0;
+    const fallbackSourceSigma = sourcePool.length > 0
+      ? Math.max(0.5, weightedStdDev(sourcePool, fallbackSourceBias))
+      : 2.5;
+    const sourceCalibrations = new Map<string, SourceCalibration>();
+
+    for (const [source, values] of sourceResiduals[measure].entries()) {
+      const sourceMean = weightedMean(values);
+      const shrinkage = values.length / (values.length + SOURCE_CALIBRATION_PRIOR_SAMPLES);
+      const biasC = fallbackSourceBias + (sourceMean - fallbackSourceBias) * shrinkage;
+      const rawSigma = Math.max(0.5, weightedStdDev(values, sourceMean));
+      const sigmaC = Math.sqrt(
+        ((rawSigma ** 2) * values.length + (fallbackSourceSigma ** 2) * SOURCE_CALIBRATION_PRIOR_SAMPLES) /
+        (values.length + SOURCE_CALIBRATION_PRIOR_SAMPLES)
+      );
+      sourceCalibrations.set(source, {
+        biasC,
+        sigmaC,
+        meanAbsoluteErrorC: weightedMeanAbsolute(values),
+        samples: values.length,
+        effectiveWeight: values.reduce((sum, item) => sum + item.weight, 0),
+        ensembleWeight: 1 / Math.max(0.25, sigmaC ** 2)
+      });
     }
-    const biasC = mean(values);
-    const centered = values.map((value) => value - biasC);
+
+    const ensembleResiduals: ResidualSample[] = [];
+    for (const [key, sourceValues] of forecastValuesByKey.entries()) {
+      const [cityKey, date, measureRaw] = key.split("|");
+      if (measureRaw !== measure || date >= targetDate) continue;
+      const actual = actualValue(actualIndex.get(`${cityKey}|${date}`), measure);
+      if (actual === undefined) continue;
+      const forecast = aggregateForecast(sourceValues, sourceCalibrations);
+      ensembleResiduals.push({
+        cityKey,
+        date,
+        residualC: actual - forecast.meanC,
+        weight: recencyWeight(date, targetDate, options.halfLifeDays)
+      });
+    }
+
+    if (ensembleResiduals.length === 0) {
+      return [measure, {
+        samples: 0,
+        biasC: 0,
+        sigmaC: 2.5,
+        meanAbsoluteErrorC: 2.5,
+        halfLifeDays: options.halfLifeDays,
+        cityBiasPriorWeight: options.cityBiasPriorWeight,
+        cityBiases: new Map(),
+        sourceCalibrations
+      }];
+    }
+
+    const residualValues = ensembleResiduals.map((sample) => ({ value: sample.residualC, weight: sample.weight }));
+    const globalBiasC = weightedMean(residualValues);
+    const byCity = new Map<string, WeightedValue[]>();
+    for (const sample of ensembleResiduals) {
+      const values = byCity.get(sample.cityKey) ?? [];
+      values.push({ value: sample.residualC, weight: sample.weight });
+      byCity.set(sample.cityKey, values);
+    }
+    const cityBiases = new Map<string, { biasC: number; samples: number; effectiveWeight: number }>();
+    for (const [cityKey, values] of byCity.entries()) {
+      const cityWeight = values.reduce((sum, item) => sum + item.weight, 0);
+      const cityMean = weightedMean(values);
+      const shrinkage = cityWeight / (cityWeight + Math.max(0, options.cityBiasPriorWeight));
+      cityBiases.set(cityKey, {
+        biasC: globalBiasC + (cityMean - globalBiasC) * shrinkage,
+        samples: values.length,
+        effectiveWeight: cityWeight
+      });
+    }
+
+    const centered = ensembleResiduals.map((sample) => ({
+      value: sample.residualC - (cityBiases.get(sample.cityKey)?.biasC ?? globalBiasC),
+      weight: sample.weight
+    }));
     return [measure, {
-      samples: values.length,
-      biasC,
-      sigmaC: Math.max(0.5, stdDev(centered)),
-      meanAbsoluteErrorC: mean(values.map((value) => Math.abs(value)))
+      samples: ensembleResiduals.length,
+      biasC: globalBiasC,
+      sigmaC: Math.max(0.5, weightedStdDev(centered, 0)),
+      meanAbsoluteErrorC: weightedMeanAbsolute(centered),
+      halfLifeDays: options.halfLifeDays,
+      cityBiasPriorWeight: options.cityBiasPriorWeight,
+      cityBiases,
+      sourceCalibrations
     }];
   }));
+}
+
+function aggregateForecast(
+  sourceValues: SourceForecastValue[],
+  sourceCalibrations: Calibration["sourceCalibrations"]
+): ForecastAggregate {
+  const rawMeanC = mean(sourceValues.map((item) => item.valueC));
+  const weightedValues = sourceValues.map((item) => {
+    const calibration = sourceCalibrations.get(item.source);
+    return {
+      value: item.valueC + (calibration?.biasC ?? 0),
+      weight: calibration?.ensembleWeight ?? 1
+    };
+  });
+  return {
+    meanC: weightedMean(weightedValues),
+    rawMeanC,
+    sourceCount: sourceValues.length
+  };
+}
+
+function buildForecastIndex(
+  forecastValuesByKey: Map<string, SourceForecastValue[]>,
+  calibration: Map<WeatherMeasure, Calibration>
+): Map<string, ForecastAggregate> {
+  return new Map([...forecastValuesByKey.entries()].map(([key, sourceValues]) => {
+    const [, , measureRaw] = key.split("|");
+    const sourceCalibrations = calibration.get(measureRaw as WeatherMeasure)?.sourceCalibrations ?? new Map();
+    return [key, aggregateForecast(sourceValues, sourceCalibrations)];
+  }));
+}
+
+function calibrationBiasForCity(calibration: Calibration, city: string): number {
+  return calibration.cityBiases.get(normalizeCityKey(city))?.biasC ?? calibration.biasC;
+}
+
+function brierScore(items: Array<{ probability: number; actual: boolean }>): number | undefined {
+  if (items.length === 0) return undefined;
+  return mean(items.map((item) => (item.probability - (item.actual ? 1 : 0)) ** 2));
 }
 
 async function mapWithConcurrency<T, U>(
@@ -362,6 +581,12 @@ export async function runWeatherMarketBacktest(
     ? options.sources
     : ["openmeteo_gfs", "openmeteo_ecmwf", "openmeteo_ukmo"];
   const maxStalenessHours = options.maxStalenessHours ?? 12;
+  const minTradePrice = Math.max(0, Math.min(1, options.minTradePrice ?? 0));
+  const calibrationHalfLifeDays = Math.max(
+    1,
+    Math.trunc(options.calibrationHalfLifeDays ?? DEFAULT_CALIBRATION_HALF_LIFE_DAYS)
+  );
+  const cityBiasPriorWeight = Math.max(0, options.cityBiasPriorWeight ?? DEFAULT_CITY_BIAS_PRIOR_WEIGHT);
 
   const [observations, previousRuns, markets] = await Promise.all([
     readJsonlRecords<WeatherObservationRecord>(config.weather.datasets.observationsPath),
@@ -372,12 +597,19 @@ export async function runWeatherMarketBacktest(
     })
   ]);
   const actualIndex = buildActualIndex(observations);
-  const forecastIndex = buildForecastIndex(previousRuns, { leadDays, sources });
-  const calibration = calibrateByMeasure(forecastIndex, actualIndex, options.date);
+  const forecastValuesByKey = buildForecastValueIndex(previousRuns, { leadDays, sources });
+  const calibration = calibrateByMeasure(forecastValuesByKey, actualIndex, options.date, {
+    halfLifeDays: calibrationHalfLifeDays,
+    cityBiasPriorWeight
+  });
+  const forecastIndex = buildForecastIndex(forecastValuesByKey, calibration);
   const candidates: Omit<WeatherBacktestTrade, "stakeUsd" | "payoutUsd" | "pnlUsd">[] = [];
+  const scoredMarkets: Array<{ probability: number; actual: boolean }> = [];
+  const candidateScores: Array<{ probability: number; actual: boolean }> = [];
 
   let skippedNoForecast = 0;
   let skippedNoActual = 0;
+  let skippedNoSettlement = 0;
   let skippedNoPrice = 0;
 
   const priceEntries = await mapWithConcurrency(markets, 20, async (market) => {
@@ -404,22 +636,23 @@ export async function runWeatherMarketBacktest(
       continue;
     }
     const actualC = actualValue(actualIndex.get(observationKey(parsed.city, parsed.date)), parsed.measure);
-    if (actualC === undefined) {
-      skippedNoActual += 1;
-      continue;
-    }
+    if (actualC === undefined) skippedNoActual += 1;
     if (!entry || decisionTimeMs === undefined) {
       skippedNoPrice += 1;
       continue;
     }
+    const resolvedYes = market.resolvedYes;
+    if (resolvedYes === undefined) {
+      skippedNoSettlement += 1;
+      continue;
+    }
 
-    const calibrationForMeasure = calibration.get(parsed.measure) ?? {
-      biasC: 0,
-      sigmaC: 2.5,
-      meanAbsoluteErrorC: 2.5,
-      samples: 0
-    };
-    const calibratedMeanC = forecast.meanC + calibrationForMeasure.biasC;
+    const calibrationForMeasure = calibration.get(parsed.measure);
+    if (!calibrationForMeasure) {
+      skippedNoForecast += 1;
+      continue;
+    }
+    const calibratedMeanC = forecast.meanC + calibrationBiasForCity(calibrationForMeasure, parsed.city);
     const fairYes = probabilityInRange(
       calibratedMeanC,
       calibrationForMeasure.sigmaC,
@@ -433,12 +666,14 @@ export async function runWeatherMarketBacktest(
     const noEdge = fairNo - noPrice;
     const side = yesEdge >= noEdge ? "YES" : "NO";
     const edge = side === "YES" ? yesEdge : noEdge;
-    if (edge < minEdge) continue;
-
-    const actualYes = marketResolvesYes(parsed, actualC);
-    const won = side === "YES" ? actualYes : !actualYes;
+    const proxyActualYes = actualC === undefined ? undefined : marketResolvesYes(parsed, actualC);
+    scoredMarkets.push({ probability: fairYes, actual: resolvedYes });
     const price = side === "YES" ? yesPrice : noPrice;
+    if (edge < minEdge || price < minTradePrice) continue;
+
+    const won = side === "YES" ? resolvedYes : !resolvedYes;
     const fair = side === "YES" ? fairYes : fairNo;
+    candidateScores.push({ probability: fair, actual: won });
     candidates.push({
       eventSlug: market.eventSlug,
       eventEndDate: market.eventEndDate,
@@ -456,7 +691,8 @@ export async function runWeatherMarketBacktest(
       calibratedMeanC,
       sigmaC: calibrationForMeasure.sigmaC,
       actualC,
-      actualYes,
+      resolvedYes,
+      proxyActualYes,
       won,
       decisionTime: new Date(decisionTimeMs).toISOString(),
       priceTime: new Date(entry.timeSec * 1000).toISOString(),
@@ -484,26 +720,44 @@ export async function runWeatherMarketBacktest(
     bankrollUsd,
     minEdge,
     strategy: "For each resolved Polymarket weather binary, estimate fair probability from calibrated day-ahead Open-Meteo previous-run forecasts; buy the better YES/NO side when edge >= minEdge; split the whole bankroll equally across all qualifying bets.",
-    calibration: [...calibration.entries()].map(([measure, item]) => ({
-      measure,
-      samples: item.samples,
-      biasC: item.biasC,
-      sigmaC: item.sigmaC,
-      meanAbsoluteErrorC: item.meanAbsoluteErrorC
-    })),
+    calibration: [...calibration.entries()].map(([measure, item]) => {
+      const weightTotal = [...item.sourceCalibrations.values()]
+        .reduce((sum, sourceCalibration) => sum + sourceCalibration.ensembleWeight, 0);
+      return {
+        measure,
+        samples: item.samples,
+        biasC: item.biasC,
+        sigmaC: item.sigmaC,
+        meanAbsoluteErrorC: item.meanAbsoluteErrorC,
+        halfLifeDays: item.halfLifeDays,
+        cityBiases: item.cityBiases.size,
+        sourceWeights: Object.fromEntries([...item.sourceCalibrations.entries()].map(([source, sourceCalibration]) => [
+          source,
+          weightTotal > 0 ? sourceCalibration.ensembleWeight / weightTotal : 0
+        ])),
+        sourceBiasC: Object.fromEntries([...item.sourceCalibrations.entries()].map(([source, sourceCalibration]) => [
+          source,
+          sourceCalibration.biasC
+        ]))
+      };
+    }),
     summary: {
       closedEvents: new Set(markets.map((market) => market.eventSlug)).size,
       binaryMarkets: markets.length,
       skippedNoForecast,
       skippedNoActual,
+      skippedNoSettlement,
       skippedNoPrice,
+      scoredMarkets: scoredMarkets.length,
       candidates: trades.length,
       wins: trades.filter((trade) => trade.won).length,
       losses: trades.filter((trade) => !trade.won).length,
       stakeUsd: totalStakeUsd,
       payoutUsd,
       pnlUsd,
-      roi: bankrollUsd > 0 ? pnlUsd / bankrollUsd : 0
+      roi: bankrollUsd > 0 ? pnlUsd / bankrollUsd : 0,
+      brierScore: brierScore(scoredMarkets),
+      candidateBrierScore: brierScore(candidateScores)
     },
     trades
   };

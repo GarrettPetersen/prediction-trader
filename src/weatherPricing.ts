@@ -7,12 +7,19 @@ import type {
 import {
   fetchNoaaClimatology,
   fetchWeatherEdgeSources,
+  resolveWeatherLocation,
   looksLikeHongKongLocation,
   type WeatherClimatologyReport,
   type WeatherLocation,
   type WeatherSourceId,
   type WeatherSourceResult
 } from "./weatherEdge.js";
+import {
+  distanceKm,
+  resolveStationForecastTarget,
+  type ParsedResolutionSource,
+  type WeatherStationInfo
+} from "./weatherStations.js";
 
 export interface WeatherForecastPoint {
   source: WeatherSourceId;
@@ -66,6 +73,7 @@ export interface WeatherPricingReport {
   };
   markets: Array<Pick<WeatherMarketCandidate, "marketSlug" | "liquidity" | "volume">>;
   location: WeatherLocation;
+  resolutionTarget?: WeatherPricingResolutionTarget;
   sources: Array<Pick<WeatherSourceResult, "source" | "provider" | "ok" | "skipped" | "note" | "error">>;
   climatology?: WeatherClimatologyReport;
   consensus?: WeatherConsensus;
@@ -82,6 +90,18 @@ export interface WeatherPricingOptions {
   noaaStationId?: string;
   noaaLocationId?: string;
   countryCode?: string;
+  allowCityForecast?: boolean;
+}
+
+export interface WeatherPricingResolutionTarget {
+  matched: boolean;
+  resolutionSource?: string;
+  resolution: ParsedResolutionSource;
+  station?: WeatherStationInfo;
+  forecastLocation: Pick<WeatherLocation, "name" | "latitude" | "longitude" | "countryCode" | "country" | "admin1">;
+  cityLocation?: Pick<WeatherLocation, "name" | "latitude" | "longitude" | "countryCode" | "country" | "admin1">;
+  cityDistanceKm?: number;
+  note?: string;
 }
 
 const BASE_WEIGHTS: Record<WeatherSourceId, number> = {
@@ -295,6 +315,17 @@ function marketToken(candidate: WeatherMarketCandidate, outcome: "Yes" | "No"): 
   return candidate.outcomes.find((item) => item.outcome.toLowerCase() === outcome.toLowerCase())?.tokenId;
 }
 
+function compactLocation(location: WeatherLocation): WeatherPricingResolutionTarget["forecastLocation"] {
+  return {
+    name: location.name,
+    latitude: location.latitude,
+    longitude: location.longitude,
+    countryCode: location.countryCode,
+    country: location.country,
+    admin1: location.admin1
+  };
+}
+
 function priceCandidate(
   candidate: WeatherMarketCandidate,
   consensus: WeatherConsensus,
@@ -360,25 +391,94 @@ function priceCandidate(
   };
 }
 
+async function resolvePricingForecastTarget(
+  config: AppConfig,
+  group: WeatherMarketGroup,
+  options: WeatherPricingOptions
+): Promise<{
+  location: WeatherLocation;
+  resolutionTarget: WeatherPricingResolutionTarget;
+  strictError?: string;
+}> {
+  const stationTarget = await resolveStationForecastTarget(group);
+  if (stationTarget.location) {
+    const cityLocation = await resolveWeatherLocation(config, {
+      city: group.city,
+      countryCode: options.countryCode
+    }).catch(() => undefined);
+    return {
+      location: stationTarget.location,
+      resolutionTarget: {
+        matched: true,
+        resolutionSource: stationTarget.resolutionSource,
+        resolution: stationTarget.resolution,
+        station: stationTarget.station,
+        forecastLocation: compactLocation(stationTarget.location),
+        cityLocation: cityLocation ? compactLocation(cityLocation) : undefined,
+        cityDistanceKm: cityLocation && stationTarget.station
+          ? distanceKm(
+            { latitude: cityLocation.latitude, longitude: cityLocation.longitude },
+            { latitude: stationTarget.station.latitude, longitude: stationTarget.station.longitude }
+          )
+          : undefined,
+        note: `Forecasting at resolution station ${stationTarget.resolution.stationId}.`
+      }
+    };
+  }
+
+  const cityLocation = await resolveWeatherLocation(config, {
+    city: group.city,
+    countryCode: options.countryCode
+  });
+  const error = `Weather market ${group.eventSlug} is not station matched: ${stationTarget.note ?? "no usable resolution station"}`;
+  return {
+    location: cityLocation,
+    resolutionTarget: {
+      matched: false,
+      resolutionSource: stationTarget.resolutionSource,
+      resolution: stationTarget.resolution,
+      forecastLocation: compactLocation(cityLocation),
+      note: stationTarget.note
+    },
+    strictError: options.allowCityForecast ? undefined : error
+  };
+}
+
 export async function priceWeatherMarketGroup(
   config: AppConfig,
   group: WeatherMarketGroup,
   options: WeatherPricingOptions = {}
 ): Promise<WeatherPricingReport> {
   const errors: string[] = [];
-  const target = Date.parse(`${group.date}T23:59:00Z`);
-  const days = Number.isFinite(target)
-    ? clamp(Math.ceil((target - Date.now()) / 86_400_000) + 1, 1, 16)
+  const targetTime = Date.parse(`${group.date}T23:59:00Z`);
+  const days = Number.isFinite(targetTime)
+    ? clamp(Math.ceil((targetTime - Date.now()) / 86_400_000) + 1, 1, 16)
     : 7;
   const sources: WeatherSourceId[] = ["openmeteo_gfs", "openmeteo_ecmwf", "openmeteo_ukmo", "nws", "hko"];
-  const forecastReport = await fetchWeatherEdgeSources(config, {
-    city: group.city,
-    countryCode: options.countryCode,
-    days,
-    sources
-  });
+  const forecastTarget = await resolvePricingForecastTarget(config, group, options);
+  const forecastReport = forecastTarget.strictError
+    ? {
+      location: forecastTarget.location,
+      requestedDays: days,
+      sources: [],
+      results: [],
+      summary: { ok: 0, skipped: 0, failed: 0 }
+    }
+    : await fetchWeatherEdgeSources(config, {
+      city: forecastTarget.location.name,
+      countryCode: forecastTarget.location.countryCode ?? options.countryCode,
+      latitude: forecastTarget.location.latitude,
+      longitude: forecastTarget.location.longitude,
+      days,
+      sources
+    });
+  if (forecastTarget.strictError) {
+    errors.push(forecastTarget.strictError);
+  }
   const climatology = options.skipClimatology
     ? undefined
+    : forecastTarget.strictError
+      ? undefined
     : await fetchNoaaClimatology(config, forecastReport.location, {
       targetDate: group.date,
       years: options.noaaYears,
@@ -415,6 +515,7 @@ export async function priceWeatherMarketGroup(
       volume: market.volume
     })),
     location: forecastReport.location,
+    resolutionTarget: forecastTarget.resolutionTarget,
     sources: forecastReport.results.map((result) => ({
       source: result.source,
       provider: result.provider,

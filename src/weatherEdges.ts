@@ -51,6 +51,11 @@ export interface WeatherEdgeRow {
   price?: number;
   liquidity?: number;
   volume?: number;
+  resolutionSource?: string;
+  forecastTargetMatched?: boolean;
+  forecastStationId?: string;
+  forecastStationName?: string;
+  forecastCityDistanceKm?: number;
   consensusMeanC?: number;
   consensusSigmaC?: number;
   modelStdDevC?: number;
@@ -137,6 +142,11 @@ export function buildWeatherEdgeRows(reports: WeatherPricingReport[]): WeatherEd
           price: outcome.price,
           liquidity: market?.liquidity,
           volume: market?.volume,
+          resolutionSource: report.resolutionTarget?.resolutionSource,
+          forecastTargetMatched: report.resolutionTarget?.matched,
+          forecastStationId: report.resolutionTarget?.station?.id,
+          forecastStationName: report.resolutionTarget?.station?.site,
+          forecastCityDistanceKm: report.resolutionTarget?.cityDistanceKm,
           consensusMeanC: report.consensus?.meanC,
           consensusSigmaC: report.consensus?.sigmaC,
           modelStdDevC: report.consensus?.modelStdDevC,
@@ -177,7 +187,8 @@ function pricingOptions(options: WeatherEdgeReportOptions): WeatherPricingOption
     skipClimatology: options.skipClimatology,
     noaaStationId: options.noaaStationId,
     noaaLocationId: options.noaaLocationId,
-    countryCode: options.countryCode
+    countryCode: options.countryCode,
+    allowCityForecast: options.allowCityForecast
   };
 }
 

@@ -87,6 +87,10 @@ import {
   type WeatherBacktestTrade
 } from "./weatherBacktest.js";
 import {
+  auditWeatherResolutionSources,
+  type WeatherResolutionAuditRow
+} from "./weatherResolutionAudit.js";
+import {
   collectWeatherBacktestRunDataset,
   collectWeatherForecastSnapshotsDataset,
   collectWeatherMarketSnapshotsDataset,
@@ -385,6 +389,7 @@ function compactWeatherMarketGroup(group: WeatherMarketGroup) {
       bestBid: market.bestBid,
       bestAsk: market.bestAsk,
       liquidity: market.liquidity,
+      resolutionSource: market.resolutionSource,
       parsedOutcome: market.parsed.outcome,
       outcomes: market.outcomes
     })),
@@ -440,6 +445,13 @@ function compactWeatherEdgeRow(row: WeatherEdgeRow) {
     kellyFraction: round(row.kellyFraction),
     liquidity: round(row.liquidity, 2),
     volume: round(row.volume, 2),
+    resolution: {
+      matched: row.forecastTargetMatched,
+      stationId: row.forecastStationId,
+      stationName: row.forecastStationName,
+      cityDistanceKm: round(row.forecastCityDistanceKm, 1),
+      source: row.resolutionSource
+    },
     consensus: {
       meanC: round(row.consensusMeanC, 2),
       sigmaC: round(row.consensusSigmaC, 2),
@@ -493,6 +505,7 @@ function compactWeatherMarketSnapshotRecord(record: WeatherMarketSnapshotRecord)
     measure: record.measure,
     marketSlug: record.marketSlug,
     question: record.question,
+    resolutionSource: record.resolutionSource,
     bestBid: record.bestBid,
     bestAsk: record.bestAsk,
     liquidity: record.liquidity,
@@ -565,6 +578,8 @@ function compactWeatherBacktestTrade(trade: WeatherBacktestTrade) {
     measure: trade.measure,
     outcomeLabel: trade.outcomeLabel,
     actualC: round(trade.actualC, 2),
+    resolvedYes: trade.resolvedYes,
+    proxyActualYes: trade.proxyActualYes,
     forecastMeanC: round(trade.forecastMeanC, 2),
     calibratedMeanC: round(trade.calibratedMeanC, 2),
     sigmaC: round(trade.sigmaC, 2),
@@ -576,10 +591,39 @@ function compactWeatherBacktestTrade(trade: WeatherBacktestTrade) {
   };
 }
 
+function compactWeatherResolutionAuditRow(row: WeatherResolutionAuditRow) {
+  return {
+    status: row.status,
+    city: row.city,
+    date: row.date,
+    measure: row.measure,
+    marketCount: row.marketCount,
+    stationId: row.resolution.stationId,
+    stationName: row.station?.site,
+    resolutionLocation: row.resolution.locationPath,
+    forecastLocation: row.forecastLocation?.name,
+    distanceKm: round(row.distanceKm, 1),
+    resolutionSource: row.resolutionSource,
+    recommendation: row.recommendation,
+    eventSlug: row.eventSlug
+  };
+}
+
 function compactWeatherPricingReport(report: WeatherPricingReport) {
   return {
     group: report.group,
     location: compactWeatherLocation(report.location),
+    resolutionTarget: report.resolutionTarget
+      ? {
+        matched: report.resolutionTarget.matched,
+        stationId: report.resolutionTarget.station?.id,
+        stationName: report.resolutionTarget.station?.site,
+        cityDistanceKm: round(report.resolutionTarget.cityDistanceKm, 1),
+        resolutionSource: report.resolutionTarget.resolutionSource,
+        note: report.resolutionTarget.note,
+        forecastLocation: report.resolutionTarget.forecastLocation
+      }
+      : undefined,
     sources: report.sources,
     climatology: report.climatology
       ? {
@@ -688,7 +732,8 @@ function weatherPricingOptions(args: Args) {
     skipClimatology: args["no-climatology"] === true || noaaYears === 0,
     noaaStationId: stringArg(args, "ncei-station", false),
     noaaLocationId: stringArg(args, "ncei-location", false),
-    countryCode: stringArg(args, "country", false)
+    countryCode: stringArg(args, "country", false),
+    allowCityForecast: args["allow-city-forecast"] === true
   };
 }
 
@@ -767,12 +812,13 @@ Commands:
   ledger:backfill [--ledger PATH] [--venue all|polymarket|vistadex] [--no-positions] [--no-fills] [--polymarket-first-page]
   weather:sources (--city CITY [--country CODE] | --latitude N --longitude N) [--days N] [--sources all|openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko,noaa_ncei] [--ncei-location ID | --ncei-station ID] [--history-date YYYY-MM-DD] [--raw]
   weather:scan [--limit N] [--max-pages N] [--include-expired] [--include-unparsed]
-  weather:price --slug EVENT_SLUG [--bankroll N] [--max-per-trade N] [--min-edge N] [--country CODE] [--noaa-years N]
-  weather:signals [--limit N] [--max-pages N] [--max-events N] [--bankroll N] [--max-per-trade N] [--min-edge N]
-  weather:edges [--date YYYY-MM-DD | --days-ahead N] [--top N | --all] [--signals-only] [--no-climatology] [--concurrency N]
+  weather:price --slug EVENT_SLUG [--bankroll N] [--max-per-trade N] [--min-edge N] [--country CODE] [--noaa-years N] [--allow-city-forecast]
+  weather:signals [--limit N] [--max-pages N] [--max-events N] [--bankroll N] [--max-per-trade N] [--min-edge N] [--allow-city-forecast]
+  weather:edges [--date YYYY-MM-DD | --days-ahead N] [--top N | --all] [--signals-only] [--no-climatology] [--concurrency N] [--allow-city-forecast]
   weather:tomorrow [--top N | --all] [--signals-only] [--no-climatology] [--concurrency N]
   weather:backtest --city CITY [--country CODE] --date YYYY-MM-DD [--measure temperature_high|temperature_low] [--years N] [--threshold N]
-  weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N]
+  weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N]
+  weather:resolution-audit [--date YYYY-MM-DD | --days-ahead N] [--status active|closed] [--distance-ok-km N] [--distance-warn-km N] [--top N]
   weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N]
   weather:dataset:observations (--city CITY [--country CODE] | --latitude N --longitude N) --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--ncei-station ID | --ncei-location ID] [--path PATH]
   weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--path PATH]
@@ -1009,7 +1055,10 @@ async function run(): Promise<void> {
       sources: listArg(args, "sources", false),
       limit: numberArg(args, "limit", false),
       maxPages: numberArg(args, "max-pages", false),
-      maxStalenessHours: numberArg(args, "max-staleness-hours", false)
+      maxStalenessHours: numberArg(args, "max-staleness-hours", false),
+      calibrationHalfLifeDays: numberArg(args, "calibration-half-life-days", false),
+      cityBiasPriorWeight: numberArg(args, "city-bias-prior-weight", false),
+      minTradePrice: numberArg(args, "min-trade-price", false)
     });
     const top = Math.max(1, Math.trunc(numberArg(args, "top", false) ?? 25));
     print(args.raw === true
@@ -1025,18 +1074,54 @@ async function run(): Promise<void> {
           samples: item.samples,
           biasC: round(item.biasC, 3),
           sigmaC: round(item.sigmaC, 3),
-          meanAbsoluteErrorC: round(item.meanAbsoluteErrorC, 3)
+          meanAbsoluteErrorC: round(item.meanAbsoluteErrorC, 3),
+          halfLifeDays: item.halfLifeDays,
+          cityBiases: item.cityBiases,
+          sourceWeights: Object.fromEntries(Object.entries(item.sourceWeights).map(([source, value]) => [source, round(value, 4)])),
+          sourceBiasC: Object.fromEntries(Object.entries(item.sourceBiasC).map(([source, value]) => [source, round(value, 3)]))
         })),
         summary: {
           ...report.summary,
           stakeUsd: round(report.summary.stakeUsd, 2),
           payoutUsd: round(report.summary.payoutUsd, 2),
           pnlUsd: round(report.summary.pnlUsd, 2),
-          roi: round(report.summary.roi, 4)
+          roi: round(report.summary.roi, 4),
+          brierScore: report.summary.brierScore === undefined ? undefined : round(report.summary.brierScore, 4),
+          candidateBrierScore: report.summary.candidateBrierScore === undefined ? undefined : round(report.summary.candidateBrierScore, 4)
         },
         displayedTrades: Math.min(top, report.trades.length),
         omittedTrades: Math.max(0, report.trades.length - top),
         trades: report.trades.slice(0, top).map(compactWeatherBacktestTrade)
+      });
+    return;
+  }
+
+  if (command === "weather:resolution-audit") {
+    const status = stringArg(args, "status", false) ?? "active";
+    if (status !== "active" && status !== "closed") {
+      throw new Error("--status must be active or closed.");
+    }
+    const report = await auditWeatherResolutionSources(config, {
+      date: stringArg(args, "date", false),
+      daysAhead: numberArg(args, "days-ahead", false),
+      status,
+      limit: numberArg(args, "limit", false),
+      maxPages: numberArg(args, "max-pages", false),
+      distanceOkKm: numberArg(args, "distance-ok-km", false),
+      distanceWarnKm: numberArg(args, "distance-warn-km", false)
+    });
+    const top = Math.max(1, Math.trunc(numberArg(args, "top", false) ?? 100));
+    print(args.raw === true
+      ? report
+      : {
+        targetDate: report.targetDate,
+        status: report.status,
+        scannedGroups: report.scannedGroups,
+        auditedGroups: report.auditedGroups,
+        summary: report.summary,
+        displayedRows: Math.min(top, report.rows.length),
+        omittedRows: Math.max(0, report.rows.length - top),
+        rows: report.rows.slice(0, top).map(compactWeatherResolutionAuditRow)
       });
     return;
   }
