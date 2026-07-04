@@ -29,6 +29,9 @@ export interface WeatherEdgeReportOptions extends WeatherPricingOptions {
   now?: Date;
   highGraceMinutes?: number;
   lowGraceMinutes?: number;
+  sizingStrategy?: WeatherPricingOptions["sizingStrategy"];
+  maxGroupFraction?: number;
+  portfolioStepUsd?: number;
 }
 
 export interface WeatherEdgeRow {
@@ -201,7 +204,10 @@ function pricingOptions(options: WeatherEdgeReportOptions): WeatherPricingOption
     noaaStationId: options.noaaStationId,
     noaaLocationId: options.noaaLocationId,
     countryCode: options.countryCode,
-    allowCityForecast: options.allowCityForecast
+    allowCityForecast: options.allowCityForecast,
+    sizingStrategy: options.sizingStrategy,
+    maxGroupFraction: options.maxGroupFraction,
+    portfolioStepUsd: options.portfolioStepUsd
   };
 }
 

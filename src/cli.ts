@@ -746,14 +746,25 @@ function weatherPricingOptions(args: Args) {
     maxPerTradeUsd: numberArg(args, "max-per-trade", false) ?? numberArg(args, "max-usd", false),
     kellyMultiplier: numberArg(args, "kelly-multiplier", false),
     maxKellyFraction: numberArg(args, "max-kelly-fraction", false),
+    maxGroupFraction: numberArg(args, "max-group-fraction", false),
+    portfolioStepUsd: numberArg(args, "portfolio-step-usd", false),
     minEdge: numberArg(args, "min-edge", false),
     noaaYears: noaaYears === 0 ? undefined : noaaYears,
     skipClimatology: args["no-climatology"] === true || noaaYears === 0,
     noaaStationId: stringArg(args, "ncei-station", false),
     noaaLocationId: stringArg(args, "ncei-location", false),
     countryCode: stringArg(args, "country", false),
-    allowCityForecast: args["allow-city-forecast"] === true
+    allowCityForecast: args["allow-city-forecast"] === true,
+    sizingStrategy: weatherSizingStrategyArg(args)
   };
+}
+
+function weatherSizingStrategyArg(args: Args): "independent_kelly" | "city_portfolio" | undefined {
+  const value = stringArg(args, "sizing", false);
+  if (value === undefined) return undefined;
+  if (value === "independent-kelly" || value === "independent_kelly") return "independent_kelly";
+  if (value === "city-portfolio" || value === "city_portfolio") return "city_portfolio";
+  throw new Error("--sizing must be independent-kelly or city-portfolio.");
 }
 
 function previousRunSourcesArg(args: Args): OpenMeteoPreviousRunSourceId[] | undefined {
@@ -833,10 +844,10 @@ Commands:
   weather:scan [--limit N] [--max-pages N] [--include-expired] [--include-unparsed]
   weather:price --slug EVENT_SLUG [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N] [--country CODE] [--noaa-years N] [--allow-city-forecast]
   weather:signals [--limit N] [--max-pages N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N] [--allow-city-forecast]
-  weather:edges [--date YYYY-MM-DD | --days-ahead N] [--top N | --all] [--signals-only] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--no-climatology] [--concurrency N] [--allow-city-forecast] [--allow-started-day] [--high-grace-minutes N] [--low-grace-minutes N]
-  weather:tomorrow [--top N | --all] [--signals-only] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--no-climatology] [--concurrency N] [--allow-started-day]
+  weather:edges [--date YYYY-MM-DD | --days-ahead N] [--top N | --all] [--signals-only] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--sizing independent-kelly|city-portfolio] [--max-group-fraction N] [--portfolio-step-usd N] [--no-climatology] [--concurrency N] [--allow-city-forecast] [--allow-started-day] [--high-grace-minutes N] [--low-grace-minutes N]
+  weather:tomorrow [--top N | --all] [--signals-only] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--sizing independent-kelly|city-portfolio] [--max-group-fraction N] [--portfolio-step-usd N] [--no-climatology] [--concurrency N] [--allow-started-day]
   weather:backtest --city CITY [--country CODE] --date YYYY-MM-DD [--measure temperature_high|temperature_low] [--years N] [--threshold N]
-  weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N]
+  weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--sizing independent-kelly|city-portfolio] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--max-group-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N]
   weather:resolution-audit [--date YYYY-MM-DD | --days-ahead N] [--status active|closed] [--distance-ok-km N] [--distance-warn-km N] [--top N]
   weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N]
   weather:dataset:observations (--city CITY [--country CODE] | --latitude N --longitude N) --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--ncei-station ID | --ncei-location ID] [--path PATH]
@@ -1084,7 +1095,10 @@ async function run(): Promise<void> {
       kellyMultiplier: numberArg(args, "kelly-multiplier", false),
       maxKellyFraction: numberArg(args, "max-kelly-fraction", false),
       maxPerTradeUsd: numberArg(args, "max-per-trade", false) ?? numberArg(args, "max-usd", false),
-      maxPortfolioFraction: numberArg(args, "max-portfolio-fraction", false)
+      maxPortfolioFraction: numberArg(args, "max-portfolio-fraction", false),
+      maxGroupFraction: numberArg(args, "max-group-fraction", false),
+      portfolioStepUsd: numberArg(args, "portfolio-step-usd", false),
+      sizingStrategy: weatherSizingStrategyArg(args)
     });
     const top = Math.max(1, Math.trunc(numberArg(args, "top", false) ?? 25));
     print(args.raw === true

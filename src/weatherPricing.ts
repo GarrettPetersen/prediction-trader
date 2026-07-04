@@ -22,6 +22,10 @@ import {
 } from "./weatherStations.js";
 import { sizeBinaryKellyBet } from "./kelly.js";
 import type { WeatherTradingWindowAssessment } from "./weatherTradingWindow.js";
+import {
+  optimizeWeatherPortfolio,
+  type WeatherPortfolioCandidate
+} from "./weatherPortfolioOptimizer.js";
 
 export interface WeatherForecastPoint {
   source: WeatherSourceId;
@@ -89,6 +93,8 @@ export interface WeatherPricingOptions {
   maxPerTradeUsd?: number;
   kellyMultiplier?: number;
   maxKellyFraction?: number;
+  maxGroupFraction?: number;
+  portfolioStepUsd?: number;
   minEdge?: number;
   noaaYears?: number;
   skipClimatology?: boolean;
@@ -96,7 +102,10 @@ export interface WeatherPricingOptions {
   noaaLocationId?: string;
   countryCode?: string;
   allowCityForecast?: boolean;
+  sizingStrategy?: WeatherSizingStrategy;
 }
+
+export type WeatherSizingStrategy = "independent_kelly" | "city_portfolio";
 
 export interface WeatherPricingResolutionTarget {
   matched: boolean;
@@ -393,6 +402,69 @@ function priceCandidate(
   };
 }
 
+function sideForSignal(signal: WeatherOutcomePricing["signal"]): "YES" | "NO" | undefined {
+  if (signal === "BUY_YES") return "YES";
+  if (signal === "BUY_NO") return "NO";
+  return undefined;
+}
+
+function applyCityPortfolioSizing(
+  candidates: WeatherMarketCandidate[],
+  outcomes: WeatherOutcomePricing[],
+  consensus: WeatherConsensus,
+  options: WeatherPricingOptions
+): WeatherOutcomePricing[] {
+  const optimizerInputs: WeatherPortfolioCandidate[] = outcomes.flatMap((outcome, index) => {
+    const side = sideForSignal(outcome.signal);
+    const market = candidates[index];
+    if (!side || !market || outcome.price === undefined || outcome.edge === undefined) return [];
+    return [{
+      id: String(index),
+      side,
+      price: outcome.price,
+      fair: side === "YES" ? outcome.fairYes : outcome.fairNo,
+      edge: outcome.edge,
+      lowerTempC: market.parsed.outcome.lowerTempC,
+      upperTempC: market.parsed.outcome.upperTempC
+    }];
+  });
+
+  if (optimizerInputs.length === 0) return outcomes;
+
+  const sizes = new Map(optimizeWeatherPortfolio(
+    optimizerInputs,
+    { meanC: consensus.meanC, sigmaC: consensus.sigmaC },
+    {
+      bankrollUsd: options.bankrollUsd,
+      maxStakeUsd: options.maxPerTradeUsd,
+      kellyMultiplier: options.kellyMultiplier,
+      maxKellyFraction: options.maxKellyFraction,
+      maxPortfolioFraction: options.maxGroupFraction,
+      stepUsd: options.portfolioStepUsd
+    }
+  ).map((size) => [size.id, size]));
+
+  return outcomes.map((outcome, index) => {
+    if (outcome.signal === "SKIP") return outcome;
+    const size = sizes.get(String(index));
+    if (!size || !size.stakeUsd || size.stakeUsd <= 0) {
+      return {
+        ...outcome,
+        kellyFraction: 0,
+        suggestedSizeUsd: undefined,
+        reason: `${outcome.reason} City-portfolio optimizer skipped it after correlated payoff checks.`
+      };
+    }
+
+    return {
+      ...outcome,
+      kellyFraction: size.kellyFraction,
+      suggestedSizeUsd: size.stakeUsd,
+      reason: `${outcome.reason} City-portfolio size ${size.stakeUsd.toFixed(2)} based on the whole ${consensus.meanC.toFixed(2)}C +/- ${consensus.sigmaC.toFixed(2)}C payoff curve.`
+    };
+  });
+}
+
 async function resolvePricingForecastTarget(
   config: AppConfig,
   group: WeatherMarketGroup,
@@ -529,7 +601,12 @@ export async function priceWeatherMarketGroup(
     climatology,
     consensus,
     outcomes: consensus
-      ? group.markets.map((candidate) => priceCandidate(candidate, consensus, options))
+      ? (() => {
+        const outcomes = group.markets.map((candidate) => priceCandidate(candidate, consensus, options));
+        return options.sizingStrategy === "city_portfolio"
+          ? applyCityPortfolioSizing(group.markets, outcomes, consensus, options)
+          : outcomes;
+      })()
       : [],
     errors
   };

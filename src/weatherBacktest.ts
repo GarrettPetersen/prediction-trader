@@ -9,6 +9,10 @@ import {
   DEFAULT_MAX_PORTFOLIO_FRACTION,
   sizeBinaryKellyPortfolio
 } from "./kelly.js";
+import {
+  optimizeWeatherPortfolio,
+  type WeatherPortfolioCandidate
+} from "./weatherPortfolioOptimizer.js";
 
 const POLYMARKET_GAMMA_BASE_URL = "https://gamma-api.polymarket.com";
 
@@ -28,7 +32,12 @@ export interface WeatherMarketBacktestOptions {
   maxKellyFraction?: number;
   maxPerTradeUsd?: number;
   maxPortfolioFraction?: number;
+  maxGroupFraction?: number;
+  portfolioStepUsd?: number;
+  sizingStrategy?: WeatherBacktestSizingStrategy;
 }
+
+export type WeatherBacktestSizingStrategy = "independent_kelly" | "city_portfolio";
 
 export interface WeatherCalibrationSummary {
   measure: WeatherMeasure;
@@ -99,11 +108,13 @@ export interface WeatherMarketBacktestReport {
     candidateBrierScore?: number;
   };
   sizing: {
-    method: "fractional_kelly";
+    method: WeatherBacktestSizingStrategy;
     kellyMultiplier: number;
     maxKellyFraction: number;
     maxPortfolioFraction: number;
+    maxGroupFraction?: number;
     maxPerTradeUsd?: number;
+    portfolioStepUsd?: number;
   };
   trades: WeatherBacktestTrade[];
 }
@@ -155,6 +166,14 @@ interface Calibration {
 }
 
 type SourceCalibration = Calibration["sourceCalibrations"] extends Map<string, infer T> ? T : never;
+
+interface BacktestSizingCandidate extends Omit<
+  WeatherBacktestTrade,
+  "fullKellyFraction" | "kellyFraction" | "rawStakeUsd" | "stakeUsd" | "payoutUsd" | "pnlUsd"
+> {
+  lowerTempC?: number;
+  upperTempC?: number;
+}
 
 interface SourceForecastValue {
   source: string;
@@ -605,6 +624,13 @@ export async function runWeatherMarketBacktest(
   const kellyMultiplier = Math.max(0, Math.min(1, options.kellyMultiplier ?? DEFAULT_KELLY_MULTIPLIER));
   const maxKellyFraction = Math.max(0, Math.min(1, options.maxKellyFraction ?? DEFAULT_MAX_KELLY_FRACTION));
   const maxPortfolioFraction = Math.max(0, Math.min(1, options.maxPortfolioFraction ?? DEFAULT_MAX_PORTFOLIO_FRACTION));
+  const maxGroupFraction = options.maxGroupFraction === undefined
+    ? maxPortfolioFraction
+    : Math.max(0, Math.min(1, options.maxGroupFraction));
+  const portfolioStepUsd = options.portfolioStepUsd === undefined
+    ? undefined
+    : Math.max(0.01, options.portfolioStepUsd);
+  const sizingStrategy = options.sizingStrategy ?? "independent_kelly";
   const maxPerTradeUsd = options.maxPerTradeUsd === undefined
     ? undefined
     : Math.max(0, options.maxPerTradeUsd);
@@ -629,10 +655,7 @@ export async function runWeatherMarketBacktest(
     cityBiasPriorWeight
   });
   const forecastIndex = buildForecastIndex(forecastValuesByKey, calibration);
-  const candidates: Omit<
-    WeatherBacktestTrade,
-    "fullKellyFraction" | "kellyFraction" | "rawStakeUsd" | "stakeUsd" | "payoutUsd" | "pnlUsd"
-  >[] = [];
+  const candidates: BacktestSizingCandidate[] = [];
   const scoredMarkets: Array<{ probability: number; actual: boolean }> = [];
   const candidateScores: Array<{ probability: number; actual: boolean }> = [];
 
@@ -719,6 +742,8 @@ export async function runWeatherMarketBacktest(
       forecastMeanC: forecast.meanC,
       calibratedMeanC,
       sigmaC: calibrationForMeasure.sigmaC,
+      lowerTempC: parsed.outcome.lowerTempC,
+      upperTempC: parsed.outcome.upperTempC,
       actualC,
       resolvedYes,
       proxyActualYes,
@@ -729,21 +754,90 @@ export async function runWeatherMarketBacktest(
     });
   }
 
-  const sizes = sizeBinaryKellyPortfolio(
-    candidates.map((trade, index) => ({
-      id: String(index),
-      probability: trade.fair,
-      price: trade.price
-    })),
-    {
-      bankrollUsd,
-      kellyMultiplier,
-      maxKellyFraction,
-      maxStakeUsd: maxPerTradeUsd,
-      maxPortfolioFraction
+  const sizes = (() => {
+    if (sizingStrategy === "independent_kelly") {
+      return sizeBinaryKellyPortfolio(
+        candidates.map((trade, index) => ({
+          id: String(index),
+          probability: trade.fair,
+          price: trade.price
+        })),
+        {
+          bankrollUsd,
+          kellyMultiplier,
+          maxKellyFraction,
+          maxStakeUsd: maxPerTradeUsd,
+          maxPortfolioFraction
+        }
+      );
     }
-  );
-  const trades = candidates.map((trade, index) => {
+
+    const byGroup = new Map<string, Array<{ candidate: BacktestSizingCandidate; index: number }>>();
+    for (const [index, candidate] of candidates.entries()) {
+      const key = `${normalizeCityKey(candidate.city)}|${candidate.date}|${candidate.measure}`;
+      const group = byGroup.get(key) ?? [];
+      group.push({ candidate, index });
+      byGroup.set(key, group);
+    }
+
+    const sizeByIndex = new Map<number, {
+      fullKellyFraction: number;
+      kellyFraction: number;
+      rawStakeUsd: number;
+      stakeUsd?: number;
+    }>();
+    for (const group of byGroup.values()) {
+      const first = group[0].candidate;
+      const optimized = optimizeWeatherPortfolio(
+        group.map(({ candidate, index }): WeatherPortfolioCandidate => ({
+          id: String(index),
+          side: candidate.side,
+          price: candidate.price,
+          fair: candidate.fair,
+          edge: candidate.edge,
+          lowerTempC: candidate.lowerTempC,
+          upperTempC: candidate.upperTempC
+        })),
+        {
+          meanC: first.calibratedMeanC,
+          sigmaC: first.sigmaC
+        },
+        {
+          bankrollUsd,
+          kellyMultiplier,
+          maxKellyFraction,
+          maxStakeUsd: maxPerTradeUsd,
+          maxPortfolioFraction: maxGroupFraction,
+          stepUsd: portfolioStepUsd
+        }
+      );
+      for (const size of optimized) {
+        sizeByIndex.set(Number(size.id), size);
+      }
+    }
+
+    const totalStakeUsd = [...sizeByIndex.values()].reduce((sum, size) => sum + (size.stakeUsd ?? 0), 0);
+    const maxPortfolioStakeUsd = bankrollUsd * maxPortfolioFraction;
+    const scale = totalStakeUsd > maxPortfolioStakeUsd && totalStakeUsd > 0
+      ? maxPortfolioStakeUsd / totalStakeUsd
+      : 1;
+
+    return candidates.map((_candidate, index) => {
+      const size = sizeByIndex.get(index);
+      const stakeUsd = (size?.stakeUsd ?? 0) * scale;
+      return {
+        id: String(index),
+        probability: candidates[index].fair,
+        price: candidates[index].price,
+        fullKellyFraction: size?.fullKellyFraction ?? 0,
+        kellyFraction: bankrollUsd > 0 ? stakeUsd / bankrollUsd : 0,
+        rawStakeUsd: size?.rawStakeUsd ?? 0,
+        stakeUsd: stakeUsd > 0 ? stakeUsd : undefined
+      };
+    });
+  })();
+  const trades = candidates.map((candidate, index) => {
+    const { lowerTempC: _lowerTempC, upperTempC: _upperTempC, ...trade } = candidate;
     const sizing = sizes[index];
     const stakeUsd = sizing?.stakeUsd ?? 0;
     const payoutUsd = trade.won ? stakeUsd / trade.price : 0;
@@ -767,7 +861,9 @@ export async function runWeatherMarketBacktest(
     leadDays,
     bankrollUsd,
     minEdge,
-    strategy: "For each resolved Polymarket weather binary, estimate fair probability from calibrated day-ahead Open-Meteo previous-run forecasts; buy the better YES/NO side when edge >= minEdge; size candidates with fractional Kelly, cap each trade, and scale the day if total suggested risk exceeds the portfolio cap.",
+    strategy: sizingStrategy === "city_portfolio"
+      ? "Estimate fair probabilities from calibrated day-ahead Open-Meteo previous-run forecasts; buy positive-edge YES/NO sides, then optimize each city/date/measure bundle over its full temperature payoff curve before applying group and daily portfolio caps."
+      : "For each resolved Polymarket weather binary, estimate fair probability from calibrated day-ahead Open-Meteo previous-run forecasts; buy the better YES/NO side when edge >= minEdge; size candidates with fractional Kelly, cap each trade, and scale the day if total suggested risk exceeds the portfolio cap.",
     calibration: [...calibration.entries()].map(([measure, item]) => {
       const weightTotal = [...item.sourceCalibrations.values()]
         .reduce((sum, sourceCalibration) => sum + sourceCalibration.ensembleWeight, 0);
@@ -808,11 +904,13 @@ export async function runWeatherMarketBacktest(
       candidateBrierScore: brierScore(candidateScores)
     },
     sizing: {
-      method: "fractional_kelly",
+      method: sizingStrategy,
       kellyMultiplier,
       maxKellyFraction,
       maxPortfolioFraction,
-      maxPerTradeUsd
+      maxGroupFraction: sizingStrategy === "city_portfolio" ? maxGroupFraction : undefined,
+      maxPerTradeUsd,
+      portfolioStepUsd: sizingStrategy === "city_portfolio" ? portfolioStepUsd : undefined
     },
     trades
   };

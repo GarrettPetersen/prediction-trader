@@ -275,7 +275,10 @@ The RainBot-style pipeline is CLI-first and review-first:
 7. Compare fair probability to market prices, apply a dynamic edge threshold,
    and size with fractional Kelly. Defaults are quarter-Kelly
    (`--kelly-multiplier 0.25`) capped at 15% of bankroll per trade
-   (`--max-kelly-fraction 0.15`).
+   (`--max-kelly-fraction 0.15`). When a city/date ladder has several
+   attractive buckets, pass `--sizing city-portfolio` to size the whole
+   city/date/measure payoff curve instead of treating each bucket as an
+   independent bet.
 8. Produce reviewable signals and paper-loop output.
 
 Discover active weather-temperature ladders:
@@ -336,6 +339,24 @@ npm run weather:edges -- \
   --max-per-trade 5 \
   --kelly-multiplier 0.25 \
   --all
+```
+
+For same-city ladders, portfolio-aware sizing can be more honest than ranked
+per-market Kelly. It evaluates all candidate YES/NO positions against the same
+temperature distribution, so it can choose between expressions like "buy one
+risky 88-89F YES" and "buy several lower-bucket NOs" based on the whole payoff
+curve. Use group caps while this is still experimental:
+
+```bash
+npm run weather:edges -- \
+  --date 2026-07-04 \
+  --bankroll 50 \
+  --max-per-trade 5 \
+  --kelly-multiplier 0.25 \
+  --sizing city-portfolio \
+  --max-group-fraction 0.25 \
+  --portfolio-step-usd 0.25 \
+  --signals-only
 ```
 
 The default grace windows are 120 minutes for highs and 15 minutes for lows.
@@ -442,8 +463,10 @@ npm run weather:backtest:markets -- \
   --bankroll 100 \
   --min-edge 0.20 \
   --min-trade-price 0.05 \
+  --sizing city-portfolio \
   --kelly-multiplier 0.25 \
   --max-kelly-fraction 0.15 \
+  --max-group-fraction 0.25 \
   --max-portfolio-fraction 1 \
   --calibration-half-life-days 365 \
   --city-bias-prior-weight 30
@@ -458,6 +481,12 @@ full Kelly stakes `(p - c) / (1 - c)` of bankroll; the default quarter-Kelly
 multiplier makes that conservative, `--max-kelly-fraction` caps each trade,
 `--max-per-trade` caps absolute dollars, and `--max-portfolio-fraction` scales
 the whole day's stake down if the total would exceed the portfolio risk budget.
+With `--sizing city-portfolio`, candidates are first grouped by
+`city/date/measure` and optimized over a discretized Normal temperature
+distribution before the daily portfolio cap is applied. `--max-group-fraction`
+limits exposure to one correlated station-day, and `--portfolio-step-usd`
+controls the optimizer's dollar granularity. Keep
+`--sizing independent-kelly` available as the baseline when comparing changes.
 NOAA actuals still calibrate forecast errors and are shown as diagnostics when
 available, but they are not used as a proxy for market settlement. It is useful
 for research, but still assumes fills at historical YES prices, infers NO prices
