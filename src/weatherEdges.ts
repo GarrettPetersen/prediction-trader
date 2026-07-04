@@ -11,6 +11,10 @@ import {
   type WeatherPricingOptions,
   type WeatherPricingReport
 } from "./weatherPricing.js";
+import {
+  assessWeatherTradingWindow,
+  type WeatherTradingWindowAssessment
+} from "./weatherTradingWindow.js";
 
 export interface WeatherEdgeReportOptions extends WeatherPricingOptions {
   date?: string;
@@ -21,6 +25,10 @@ export interface WeatherEdgeReportOptions extends WeatherPricingOptions {
   concurrency?: number;
   minLiquidity?: number;
   includeExpired?: boolean;
+  allowStartedDay?: boolean;
+  now?: Date;
+  highGraceMinutes?: number;
+  lowGraceMinutes?: number;
 }
 
 export interface WeatherEdgeRow {
@@ -60,6 +68,7 @@ export interface WeatherEdgeRow {
   consensusSigmaC?: number;
   modelStdDevC?: number;
   agreement?: string;
+  tradingWindow?: WeatherTradingWindowAssessment;
   reason: string;
 }
 
@@ -68,6 +77,7 @@ export interface WeatherEdgeReport {
   scannedGroups: number;
   targetGroups: number;
   pricedGroups: number;
+  timeSkippedGroups: number;
   erroredGroups: number;
   marketCount: number;
   rowCount: number;
@@ -151,6 +161,7 @@ export function buildWeatherEdgeRows(reports: WeatherPricingReport[]): WeatherEd
           consensusSigmaC: report.consensus?.sigmaC,
           modelStdDevC: report.consensus?.modelStdDevC,
           agreement: report.consensus?.agreement,
+          tradingWindow: report.tradingWindow,
           reason: outcome.reason
         };
       });
@@ -182,6 +193,8 @@ function pricingOptions(options: WeatherEdgeReportOptions): WeatherPricingOption
   return {
     bankrollUsd: options.bankrollUsd,
     maxPerTradeUsd: options.maxPerTradeUsd,
+    kellyMultiplier: options.kellyMultiplier,
+    maxKellyFraction: options.maxKellyFraction,
     minEdge: options.minEdge,
     noaaYears: options.noaaYears,
     skipClimatology: options.skipClimatology,
@@ -190,6 +203,27 @@ function pricingOptions(options: WeatherEdgeReportOptions): WeatherPricingOption
     countryCode: options.countryCode,
     allowCityForecast: options.allowCityForecast
   };
+}
+
+function assessReportTradingWindow(
+  report: WeatherPricingReport,
+  options: Pick<WeatherEdgeReportOptions, "now" | "highGraceMinutes" | "lowGraceMinutes">
+): WeatherTradingWindowAssessment {
+  const forecastLocation = report.resolutionTarget?.forecastLocation ?? report.location;
+  const station = report.resolutionTarget?.station;
+  return assessWeatherTradingWindow({
+    targetDate: report.group.date,
+    measure: report.group.measure,
+    timezone: report.location.timezone,
+    countryCode: forecastLocation.countryCode ?? station?.country,
+    country: forecastLocation.country ?? station?.country,
+    admin1: forecastLocation.admin1 ?? station?.state,
+    state: station?.state,
+    longitude: forecastLocation.longitude ?? station?.longitude,
+    now: options.now,
+    highGraceMinutes: options.highGraceMinutes,
+    lowGraceMinutes: options.lowGraceMinutes
+  });
 }
 
 export async function computeWeatherEdgeReport(
@@ -208,7 +242,7 @@ export async function computeWeatherEdgeReport(
     : Math.max(0, Math.trunc(options.maxEvents));
   const selectedGroups = targetGroups.slice(0, maxEvents);
   const errors: WeatherEdgeReport["errors"] = [];
-  const reports = (await mapWithConcurrency(
+  const pricedReports = (await mapWithConcurrency(
     selectedGroups,
     options.concurrency ?? 2,
     async (group) => {
@@ -225,6 +259,13 @@ export async function computeWeatherEdgeReport(
       }
     }
   )).filter((report): report is WeatherPricingReport => report !== undefined);
+  const reportsWithTiming = pricedReports.map((report) => ({
+    ...report,
+    tradingWindow: assessReportTradingWindow(report, options)
+  }));
+  const reports = options.allowStartedDay
+    ? reportsWithTiming
+    : reportsWithTiming.filter((report) => report.tradingWindow?.safeToTrade);
 
   const rows = buildWeatherEdgeRows(reports)
     .filter((row) => options.minLiquidity === undefined || (row.liquidity ?? 0) >= options.minLiquidity);
@@ -236,6 +277,7 @@ export async function computeWeatherEdgeReport(
     scannedGroups: groups.length,
     targetGroups: targetGroups.length,
     pricedGroups: reports.length,
+    timeSkippedGroups: reportsWithTiming.length - reports.length,
     erroredGroups: errors.length,
     marketCount: reports.reduce((sum, report) => sum + report.group.marketCount, 0),
     rowCount: rows.length,

@@ -3,6 +3,12 @@ import { parseGammaList } from "./marketplaces/polymarketData.js";
 import { type WeatherObservationRecord, type WeatherPreviousRunForecastRecord, readJsonlRecords } from "./weatherDatasets.js";
 import { parseWeatherMarketQuestion, type ParsedWeatherMarket, type WeatherMeasure } from "./weatherMarkets.js";
 import { probabilityInRange } from "./weatherPricing.js";
+import {
+  DEFAULT_KELLY_MULTIPLIER,
+  DEFAULT_MAX_KELLY_FRACTION,
+  DEFAULT_MAX_PORTFOLIO_FRACTION,
+  sizeBinaryKellyPortfolio
+} from "./kelly.js";
 
 const POLYMARKET_GAMMA_BASE_URL = "https://gamma-api.polymarket.com";
 
@@ -18,6 +24,10 @@ export interface WeatherMarketBacktestOptions {
   calibrationHalfLifeDays?: number;
   cityBiasPriorWeight?: number;
   minTradePrice?: number;
+  kellyMultiplier?: number;
+  maxKellyFraction?: number;
+  maxPerTradeUsd?: number;
+  maxPortfolioFraction?: number;
 }
 
 export interface WeatherCalibrationSummary {
@@ -52,6 +62,9 @@ export interface WeatherBacktestTrade {
   resolvedYes: boolean;
   proxyActualYes?: boolean;
   won: boolean;
+  fullKellyFraction: number;
+  kellyFraction: number;
+  rawStakeUsd: number;
   stakeUsd: number;
   payoutUsd: number;
   pnlUsd: number;
@@ -84,6 +97,13 @@ export interface WeatherMarketBacktestReport {
     roi: number;
     brierScore?: number;
     candidateBrierScore?: number;
+  };
+  sizing: {
+    method: "fractional_kelly";
+    kellyMultiplier: number;
+    maxKellyFraction: number;
+    maxPortfolioFraction: number;
+    maxPerTradeUsd?: number;
   };
   trades: WeatherBacktestTrade[];
 }
@@ -582,6 +602,12 @@ export async function runWeatherMarketBacktest(
     : ["openmeteo_gfs", "openmeteo_ecmwf", "openmeteo_ukmo"];
   const maxStalenessHours = options.maxStalenessHours ?? 12;
   const minTradePrice = Math.max(0, Math.min(1, options.minTradePrice ?? 0));
+  const kellyMultiplier = Math.max(0, Math.min(1, options.kellyMultiplier ?? DEFAULT_KELLY_MULTIPLIER));
+  const maxKellyFraction = Math.max(0, Math.min(1, options.maxKellyFraction ?? DEFAULT_MAX_KELLY_FRACTION));
+  const maxPortfolioFraction = Math.max(0, Math.min(1, options.maxPortfolioFraction ?? DEFAULT_MAX_PORTFOLIO_FRACTION));
+  const maxPerTradeUsd = options.maxPerTradeUsd === undefined
+    ? undefined
+    : Math.max(0, options.maxPerTradeUsd);
   const calibrationHalfLifeDays = Math.max(
     1,
     Math.trunc(options.calibrationHalfLifeDays ?? DEFAULT_CALIBRATION_HALF_LIFE_DAYS)
@@ -603,7 +629,10 @@ export async function runWeatherMarketBacktest(
     cityBiasPriorWeight
   });
   const forecastIndex = buildForecastIndex(forecastValuesByKey, calibration);
-  const candidates: Omit<WeatherBacktestTrade, "stakeUsd" | "payoutUsd" | "pnlUsd">[] = [];
+  const candidates: Omit<
+    WeatherBacktestTrade,
+    "fullKellyFraction" | "kellyFraction" | "rawStakeUsd" | "stakeUsd" | "payoutUsd" | "pnlUsd"
+  >[] = [];
   const scoredMarkets: Array<{ probability: number; actual: boolean }> = [];
   const candidateScores: Array<{ probability: number; actual: boolean }> = [];
 
@@ -700,16 +729,35 @@ export async function runWeatherMarketBacktest(
     });
   }
 
-  const stakeUsd = candidates.length > 0 ? bankrollUsd / candidates.length : 0;
-  const trades = candidates.map((trade) => {
+  const sizes = sizeBinaryKellyPortfolio(
+    candidates.map((trade, index) => ({
+      id: String(index),
+      probability: trade.fair,
+      price: trade.price
+    })),
+    {
+      bankrollUsd,
+      kellyMultiplier,
+      maxKellyFraction,
+      maxStakeUsd: maxPerTradeUsd,
+      maxPortfolioFraction
+    }
+  );
+  const trades = candidates.map((trade, index) => {
+    const sizing = sizes[index];
+    const stakeUsd = sizing?.stakeUsd ?? 0;
     const payoutUsd = trade.won ? stakeUsd / trade.price : 0;
     return {
       ...trade,
+      fullKellyFraction: sizing?.fullKellyFraction ?? 0,
+      kellyFraction: sizing?.kellyFraction ?? 0,
+      rawStakeUsd: sizing?.rawStakeUsd ?? 0,
       stakeUsd,
       payoutUsd,
       pnlUsd: payoutUsd - stakeUsd
     };
-  }).sort((a, b) => b.edge - a.edge);
+  }).filter((trade) => trade.stakeUsd > 0)
+    .sort((a, b) => b.edge - a.edge);
   const payoutUsd = trades.reduce((sum, trade) => sum + trade.payoutUsd, 0);
   const totalStakeUsd = trades.reduce((sum, trade) => sum + trade.stakeUsd, 0);
   const pnlUsd = payoutUsd - totalStakeUsd;
@@ -719,7 +767,7 @@ export async function runWeatherMarketBacktest(
     leadDays,
     bankrollUsd,
     minEdge,
-    strategy: "For each resolved Polymarket weather binary, estimate fair probability from calibrated day-ahead Open-Meteo previous-run forecasts; buy the better YES/NO side when edge >= minEdge; split the whole bankroll equally across all qualifying bets.",
+    strategy: "For each resolved Polymarket weather binary, estimate fair probability from calibrated day-ahead Open-Meteo previous-run forecasts; buy the better YES/NO side when edge >= minEdge; size candidates with fractional Kelly, cap each trade, and scale the day if total suggested risk exceeds the portfolio cap.",
     calibration: [...calibration.entries()].map(([measure, item]) => {
       const weightTotal = [...item.sourceCalibrations.values()]
         .reduce((sum, sourceCalibration) => sum + sourceCalibration.ensembleWeight, 0);
@@ -758,6 +806,13 @@ export async function runWeatherMarketBacktest(
       roi: bankrollUsd > 0 ? pnlUsd / bankrollUsd : 0,
       brierScore: brierScore(scoredMarkets),
       candidateBrierScore: brierScore(candidateScores)
+    },
+    sizing: {
+      method: "fractional_kelly",
+      kellyMultiplier,
+      maxKellyFraction,
+      maxPortfolioFraction,
+      maxPerTradeUsd
     },
     trades
   };

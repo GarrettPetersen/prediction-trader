@@ -273,7 +273,9 @@ The RainBot-style pipeline is CLI-first and review-first:
 5. Blend in a 10-year same-calendar-date NOAA prior when available.
 6. Price each outcome with a Normal CDF.
 7. Compare fair probability to market prices, apply a dynamic edge threshold,
-   and size with quarter-Kelly capped at 15% of bankroll.
+   and size with fractional Kelly. Defaults are quarter-Kelly
+   (`--kelly-multiplier 0.25`) capped at 15% of bankroll per trade
+   (`--max-kelly-fraction 0.15`).
 8. Produce reviewable signals and paper-loop output.
 
 Discover active weather-temperature ladders:
@@ -288,7 +290,8 @@ Price one Polymarket weather event by event slug:
 npm run weather:price -- \
   --slug highest-temperature-in-vancouver-on-july-4-2026 \
   --bankroll 100 \
-  --max-per-trade 5
+  --max-per-trade 5 \
+  --kelly-multiplier 0.25
 ```
 
 Scan and rank candidate signals:
@@ -299,7 +302,8 @@ npm run weather:signals -- \
   --max-pages 4 \
   --max-events 8 \
   --bankroll 100 \
-  --max-per-trade 5
+  --max-per-trade 5 \
+  --kelly-multiplier 0.25
 ```
 
 Compute our edge on every parsed tomorrow weather-temperature market:
@@ -308,22 +312,38 @@ Compute our edge on every parsed tomorrow weather-temperature market:
 npm run weather:tomorrow -- \
   --bankroll 100 \
   --max-per-trade 5 \
+  --kelly-multiplier 0.25 \
   --top 50
 ```
 
 That command defaults to tomorrow in the local machine timezone, scans the
 Polymarket `weather` tag, filters to parsed daily high/low temperature ladders,
-prices each binary market, and prints a ranked edge table. Add `--all` to print
-every priced row, `--signals-only` to show only edges above the dynamic
-threshold, or `--date YYYY-MM-DD` with `weather:edges` to inspect another day:
+prices each binary market, and prints a ranked edge table. Weather scans are
+market-local-time conservative by default: after station matching, `weather:edges`
+infers the resolution station timezone and skips a market if its local target
+day is already underway. High-temperature markets get a small post-midnight
+grace window because the high usually has not happened yet; low-temperature
+markets get a much tighter grace window because the low can occur overnight.
+Use `--allow-started-day` only for manual research, not unattended trading.
+Add `--all` to print every priced row, `--signals-only` to show only edges above
+the dynamic threshold, or `--date YYYY-MM-DD` with `weather:edges` to inspect
+another day:
 
 ```bash
 npm run weather:edges -- \
   --date 2026-07-04 \
   --bankroll 100 \
   --max-per-trade 5 \
+  --kelly-multiplier 0.25 \
   --all
 ```
+
+The default grace windows are 120 minutes for highs and 15 minutes for lows.
+Override them with `--high-grace-minutes N` and `--low-grace-minutes N` when
+running experiments. A future Cloudflare Worker should schedule by market-local
+timezone, not by one global UTC cron: run shortly before local midnight for each
+city/date bucket, pull fresh forecasts and market prices, apply the timing guard
+and Kelly sizing, then write the quote/order/position state to the ledger.
 
 For a fast forecast-only universe scan, skip NOAA climatology:
 
@@ -340,7 +360,8 @@ npm run weather:run -- \
   --interval-sec 300 \
   --max-events 8 \
   --bankroll 100 \
-  --max-per-trade 5
+  --max-per-trade 5 \
+  --kelly-multiplier 0.25
 ```
 
 Backtest the NOAA climatology prior for a city/date:
@@ -421,6 +442,9 @@ npm run weather:backtest:markets -- \
   --bankroll 100 \
   --min-edge 0.20 \
   --min-trade-price 0.05 \
+  --kelly-multiplier 0.25 \
+  --max-kelly-fraction 0.15 \
+  --max-portfolio-fraction 1 \
   --calibration-half-life-days 365 \
   --city-bias-prior-weight 30
 ```
@@ -428,14 +452,19 @@ npm run weather:backtest:markets -- \
 That command fetches resolved Polymarket weather binaries for the date, joins
 their historical price just before the decision time to local Open-Meteo
 previous-run forecasts, settles PnL from Polymarket's final resolved outcome,
-and splits the bankroll equally across every side whose calibrated probability
-edge exceeds `--min-edge`. NOAA actuals still calibrate forecast errors and are
-shown as diagnostics when available, but they are not used as a proxy for market
-settlement. It is useful for research, but still assumes fills at historical YES
-prices, infers NO prices as `1 - YES`, and does not yet model order-book depth,
-spread, fees, or liquidity caps. Use `--min-trade-price` to exclude very cheap
-contracts while we are still using last-trade/price-history fills instead of
-full order-book simulation.
+sizes every side whose calibrated probability edge exceeds `--min-edge` with
+fractional Kelly. For a binary contract priced `c` with fair probability `p`,
+full Kelly stakes `(p - c) / (1 - c)` of bankroll; the default quarter-Kelly
+multiplier makes that conservative, `--max-kelly-fraction` caps each trade,
+`--max-per-trade` caps absolute dollars, and `--max-portfolio-fraction` scales
+the whole day's stake down if the total would exceed the portfolio risk budget.
+NOAA actuals still calibrate forecast errors and are shown as diagnostics when
+available, but they are not used as a proxy for market settlement. It is useful
+for research, but still assumes fills at historical YES prices, infers NO prices
+as `1 - YES`, and does not yet model order-book depth, spread, fees, or
+liquidity caps. Use `--min-trade-price` to exclude very cheap contracts while we
+are still using last-trade/price-history fills instead of full order-book
+simulation.
 
 The market backtest calibrates the forecast before pricing bins:
 

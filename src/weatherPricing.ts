@@ -20,6 +20,8 @@ import {
   type ParsedResolutionSource,
   type WeatherStationInfo
 } from "./weatherStations.js";
+import { sizeBinaryKellyBet } from "./kelly.js";
+import type { WeatherTradingWindowAssessment } from "./weatherTradingWindow.js";
 
 export interface WeatherForecastPoint {
   source: WeatherSourceId;
@@ -76,6 +78,7 @@ export interface WeatherPricingReport {
   resolutionTarget?: WeatherPricingResolutionTarget;
   sources: Array<Pick<WeatherSourceResult, "source" | "provider" | "ok" | "skipped" | "note" | "error">>;
   climatology?: WeatherClimatologyReport;
+  tradingWindow?: WeatherTradingWindowAssessment;
   consensus?: WeatherConsensus;
   outcomes: WeatherOutcomePricing[];
   errors: string[];
@@ -84,6 +87,8 @@ export interface WeatherPricingReport {
 export interface WeatherPricingOptions {
   bankrollUsd?: number;
   maxPerTradeUsd?: number;
+  kellyMultiplier?: number;
+  maxKellyFraction?: number;
   minEdge?: number;
   noaaYears?: number;
   skipClimatology?: boolean;
@@ -176,12 +181,6 @@ function agreementTier(spread: number): WeatherConsensus["agreement"] {
 
 function dynamicEdgeThreshold(sigmaC: number, override?: number): number {
   return override ?? clamp(sigmaC * 0.02, 0.03, 0.08);
-}
-
-function quarterKelly(probability: number, price: number): number {
-  if (price <= 0 || price >= 1) return 0;
-  const fullKelly = (probability - price) / (1 - price);
-  return clamp(fullKelly * 0.25, 0, 0.15);
 }
 
 function hoursToResolution(group: WeatherMarketGroup): number {
@@ -352,14 +351,17 @@ function priceCandidate(
   const signal = bestSignal.edge !== undefined && bestSignal.edge >= threshold
     ? bestSignal.signal
     : "SKIP";
-  const kellyFraction = signal === "SKIP" || bestSignal.price === undefined
-    ? 0
-    : quarterKelly(bestSignal.probability, bestSignal.price);
-  const bankroll = options.bankrollUsd ?? 0;
-  const maxPerTrade = options.maxPerTradeUsd ?? Infinity;
-  const suggestedSizeUsd = kellyFraction > 0 && bankroll > 0
-    ? Math.min(bankroll * kellyFraction, maxPerTrade)
-    : undefined;
+  const sizing = signal === "SKIP" || bestSignal.price === undefined
+    ? { kellyFraction: 0, stakeUsd: undefined }
+    : sizeBinaryKellyBet(
+      { probability: bestSignal.probability, price: bestSignal.price },
+      {
+        bankrollUsd: options.bankrollUsd,
+        maxStakeUsd: options.maxPerTradeUsd,
+        kellyMultiplier: options.kellyMultiplier,
+        maxKellyFraction: options.maxKellyFraction
+      }
+    );
   const confidence = consensus.agreement === "VERY_HIGH" || consensus.agreement === "HIGH"
     ? "HIGH"
     : consensus.agreement === "MODERATE"
@@ -381,8 +383,8 @@ function priceCandidate(
     signal,
     edge: signal === "SKIP" ? bestSignal.edge : bestSignal.edge,
     confidence,
-    kellyFraction,
-    suggestedSizeUsd,
+    kellyFraction: sizing.kellyFraction,
+    suggestedSizeUsd: sizing.stakeUsd,
     tokenId: signal === "SKIP" ? undefined : bestSignal.tokenId,
     price: signal === "SKIP" ? undefined : bestSignal.price,
     reason: signal === "SKIP"

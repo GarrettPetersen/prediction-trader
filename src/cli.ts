@@ -457,6 +457,18 @@ function compactWeatherEdgeRow(row: WeatherEdgeRow) {
       sigmaC: round(row.consensusSigmaC, 2),
       agreement: row.agreement
     },
+    tradingWindow: row.tradingWindow
+      ? {
+        safeToTrade: row.tradingWindow.safeToTrade,
+        status: row.tradingWindow.status,
+        timezone: row.tradingWindow.timezone,
+        localDate: row.tradingWindow.localDate,
+        localTime: row.tradingWindow.localTime,
+        minutesAfterLocalMidnight: row.tradingWindow.minutesAfterLocalMidnight,
+        graceMinutes: row.tradingWindow.graceMinutes,
+        reason: row.tradingWindow.reason
+      }
+      : undefined,
     tokenId: row.tokenId,
     price: round(row.price)
   };
@@ -473,6 +485,7 @@ function compactWeatherEdgeReport(report: WeatherEdgeReport, args: Args) {
     scannedGroups: report.scannedGroups,
     targetGroups: report.targetGroups,
     pricedGroups: report.pricedGroups,
+    timeSkippedGroups: report.timeSkippedGroups,
     erroredGroups: report.erroredGroups,
     marketCount: report.marketCount,
     rowCount: report.rowCount,
@@ -574,6 +587,9 @@ function compactWeatherBacktestTrade(trade: WeatherBacktestTrade) {
     edge: round(trade.edge),
     fair: round(trade.fair),
     price: round(trade.price),
+    fullKellyFraction: round(trade.fullKellyFraction),
+    kellyFraction: round(trade.kellyFraction),
+    rawStakeUsd: round(trade.rawStakeUsd, 2),
     city: trade.city,
     measure: trade.measure,
     outcomeLabel: trade.outcomeLabel,
@@ -625,6 +641,7 @@ function compactWeatherPricingReport(report: WeatherPricingReport) {
       }
       : undefined,
     sources: report.sources,
+    tradingWindow: report.tradingWindow,
     climatology: report.climatology
       ? {
         ok: report.climatology.ok,
@@ -727,6 +744,8 @@ function weatherPricingOptions(args: Args) {
   return {
     bankrollUsd: numberArg(args, "bankroll", false),
     maxPerTradeUsd: numberArg(args, "max-per-trade", false) ?? numberArg(args, "max-usd", false),
+    kellyMultiplier: numberArg(args, "kelly-multiplier", false),
+    maxKellyFraction: numberArg(args, "max-kelly-fraction", false),
     minEdge: numberArg(args, "min-edge", false),
     noaaYears: noaaYears === 0 ? undefined : noaaYears,
     skipClimatology: args["no-climatology"] === true || noaaYears === 0,
@@ -812,19 +831,19 @@ Commands:
   ledger:backfill [--ledger PATH] [--venue all|polymarket|vistadex] [--no-positions] [--no-fills] [--polymarket-first-page]
   weather:sources (--city CITY [--country CODE] | --latitude N --longitude N) [--days N] [--sources all|openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko,noaa_ncei] [--ncei-location ID | --ncei-station ID] [--history-date YYYY-MM-DD] [--raw]
   weather:scan [--limit N] [--max-pages N] [--include-expired] [--include-unparsed]
-  weather:price --slug EVENT_SLUG [--bankroll N] [--max-per-trade N] [--min-edge N] [--country CODE] [--noaa-years N] [--allow-city-forecast]
-  weather:signals [--limit N] [--max-pages N] [--max-events N] [--bankroll N] [--max-per-trade N] [--min-edge N] [--allow-city-forecast]
-  weather:edges [--date YYYY-MM-DD | --days-ahead N] [--top N | --all] [--signals-only] [--no-climatology] [--concurrency N] [--allow-city-forecast]
-  weather:tomorrow [--top N | --all] [--signals-only] [--no-climatology] [--concurrency N]
+  weather:price --slug EVENT_SLUG [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N] [--country CODE] [--noaa-years N] [--allow-city-forecast]
+  weather:signals [--limit N] [--max-pages N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N] [--allow-city-forecast]
+  weather:edges [--date YYYY-MM-DD | --days-ahead N] [--top N | --all] [--signals-only] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--no-climatology] [--concurrency N] [--allow-city-forecast] [--allow-started-day] [--high-grace-minutes N] [--low-grace-minutes N]
+  weather:tomorrow [--top N | --all] [--signals-only] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--no-climatology] [--concurrency N] [--allow-started-day]
   weather:backtest --city CITY [--country CODE] --date YYYY-MM-DD [--measure temperature_high|temperature_low] [--years N] [--threshold N]
-  weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N]
+  weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N]
   weather:resolution-audit [--date YYYY-MM-DD | --days-ahead N] [--status active|closed] [--distance-ok-km N] [--distance-warn-km N] [--top N]
-  weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N]
+  weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N]
   weather:dataset:observations (--city CITY [--country CODE] | --latitude N --longitude N) --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--ncei-station ID | --ncei-location ID] [--path PATH]
   weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--path PATH]
   weather:dataset:forecasts [--market-captured-at ISO] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko] [--max-cities N] [--path PATH]
   weather:dataset:previous-runs --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--cities CITY[,CITY...]] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--lead-days 1,2,3] [--max-cities N] [--path PATH]
-  weather:dataset:run [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--max-events N] [--bankroll N] [--max-per-trade N] [--no-climatology] [--path PATH]
+  weather:dataset:run [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--no-climatology] [--path PATH]
   weather:dataset:summary
   football:ratings [--refresh] [--team TEAM] [--limit N]
   football:price --slug SLUG [--refresh] [--home TEAM --away TEAM] [--edge-threshold N]
@@ -998,7 +1017,10 @@ async function run(): Promise<void> {
       maxEvents: numberArg(args, "max-events", false),
       concurrency: numberArg(args, "concurrency", false),
       minLiquidity: numberArg(args, "min-liquidity", false),
-      includeExpired: args["include-expired"] === true
+      includeExpired: args["include-expired"] === true,
+      allowStartedDay: args["allow-started-day"] === true,
+      highGraceMinutes: numberArg(args, "high-grace-minutes", false),
+      lowGraceMinutes: numberArg(args, "low-grace-minutes", false)
     });
     print(args.raw === true ? report : compactWeatherEdgeReport(report, args));
     return;
@@ -1058,7 +1080,11 @@ async function run(): Promise<void> {
       maxStalenessHours: numberArg(args, "max-staleness-hours", false),
       calibrationHalfLifeDays: numberArg(args, "calibration-half-life-days", false),
       cityBiasPriorWeight: numberArg(args, "city-bias-prior-weight", false),
-      minTradePrice: numberArg(args, "min-trade-price", false)
+      minTradePrice: numberArg(args, "min-trade-price", false),
+      kellyMultiplier: numberArg(args, "kelly-multiplier", false),
+      maxKellyFraction: numberArg(args, "max-kelly-fraction", false),
+      maxPerTradeUsd: numberArg(args, "max-per-trade", false) ?? numberArg(args, "max-usd", false),
+      maxPortfolioFraction: numberArg(args, "max-portfolio-fraction", false)
     });
     const top = Math.max(1, Math.trunc(numberArg(args, "top", false) ?? 25));
     print(args.raw === true
@@ -1069,6 +1095,7 @@ async function run(): Promise<void> {
         bankrollUsd: report.bankrollUsd,
         minEdge: report.minEdge,
         strategy: report.strategy,
+        sizing: report.sizing,
         calibration: report.calibration.map((item) => ({
           measure: item.measure,
           samples: item.samples,
