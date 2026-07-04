@@ -30,6 +30,16 @@ describe("trade safety", () => {
     assert.equal(getTicketNotionalUsd(vistadexTicket), 3);
   });
 
+  it("computes Vistadex sell notional from shares and limit price", () => {
+    assert.equal(getTicketNotionalUsd({
+      ...vistadexTicket,
+      side: "sell",
+      amountUsd: undefined,
+      shares: 4,
+      limitPrice: 0.75
+    }), 3);
+  });
+
   it("requires the command execute flag", () => {
     assert.throws(
       () => assertCanExecute(polyTicket, { liveEnabled: true, maxUsd: 5 }, false),

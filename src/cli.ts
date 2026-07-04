@@ -72,6 +72,13 @@ import {
   type WeatherMarketGroup
 } from "./weatherMarkets.js";
 import {
+  computeVistadexMiddayWeatherReport,
+  formatFahrenheit,
+  type MiddayWeatherGroupReport,
+  type MiddayWeatherOutcomePricing,
+  type MiddayWeatherReport
+} from "./weatherMidday.js";
+import {
   priceWeatherMarketGroup,
   rankWeatherSignals,
   type WeatherOutcomePricing,
@@ -670,6 +677,106 @@ function compactWeatherPricingReport(report: WeatherPricingReport) {
   };
 }
 
+function compactMiddayWeatherOutcome(row: MiddayWeatherOutcomePricing) {
+  return {
+    signal: row.signal,
+    bestSide: row.bestSide,
+    bestEdge: round(row.edge),
+    eventSlug: row.eventSlug,
+    marketSlug: row.marketSlug,
+    question: row.question,
+    fairYes: round(row.fairYes),
+    yesBid: round(row.yesBid),
+    yesAsk: round(row.yesAsk),
+    yesEdge: round(row.yesEdge),
+    fairNo: round(row.fairNo),
+    noBid: round(row.noBid),
+    noAsk: round(row.noAsk),
+    noEdge: round(row.noEdge),
+    lockedByObservation: row.lockedByObservation,
+    confidence: row.confidence,
+    suggestedSizeUsd: round(row.suggestedSizeUsd, 2),
+    kellyFraction: round(row.kellyFraction),
+    price: round(row.price),
+    held: row.held
+      ? {
+        outcome: row.held.outcome,
+        balance: round(row.held.balance, 4),
+        midpoint: round(row.held.midpoint),
+        bestBid: round(row.held.bestBid),
+        bestAsk: round(row.held.bestAsk)
+      }
+      : undefined,
+    reason: row.reason
+  };
+}
+
+function compactMiddayWeatherGroup(report: MiddayWeatherGroupReport) {
+  return {
+    group: report.group,
+    station: report.station
+      ? {
+        id: report.station.id,
+        name: report.station.site,
+        state: report.station.state,
+        country: report.station.country
+      }
+      : undefined,
+    resolutionSource: report.resolutionSource,
+    observation: report.observation
+      ? {
+        timezone: report.observation.timezone,
+        observationCount: report.observation.observationCount,
+        latestObservedAt: report.observation.latestObservedAt,
+        latestTempF: formatFahrenheit(report.observation.latestTempC),
+        highSoFarF: formatFahrenheit(report.observation.highSoFarC),
+        lowSoFarF: formatFahrenheit(report.observation.lowSoFarC)
+      }
+      : undefined,
+    consensus: report.consensus
+      ? {
+        measure: report.consensus.measure,
+        observedExtremeF: formatFahrenheit(report.consensus.observedExtremeC),
+        forecastExtremeMeanF: formatFahrenheit(report.consensus.forecastExtremeMeanC),
+        finalMeanF: formatFahrenheit(report.consensus.finalMeanC),
+        sigmaF: round(report.consensus.sigmaC * 9 / 5, 2),
+        modelStdDevF: round(report.consensus.modelStdDevC * 9 / 5, 2),
+        remainingHourCount: report.consensus.remainingHourCount,
+        forecastPoints: report.consensus.forecastPoints.map((point) => ({
+          source: point.source,
+          valueF: formatFahrenheit(point.valueC),
+          hourlyCount: point.hourlyCount
+        }))
+      }
+      : undefined,
+    sourceSummary: report.sourceSummary,
+    errors: report.errors,
+    outcomes: report.outcomes.map(compactMiddayWeatherOutcome)
+  };
+}
+
+function compactMiddayWeatherReport(report: MiddayWeatherReport, args: Args) {
+  const sourceRows = args["signals-only"] === true ? report.signals : report.rows;
+  const top = args.all === true
+    ? sourceRows.length
+    : Math.max(1, Math.trunc(numberArg(args, "top", false) ?? 50));
+  const rows = sourceRows.slice(0, top);
+  return {
+    targetDate: report.targetDate,
+    scannedEvents: report.scannedEvents,
+    groupCount: report.groupCount,
+    rowCount: report.rowCount,
+    signalCount: report.signalCount,
+    displayedRows: rows.length,
+    omittedRows: Math.max(0, sourceRows.length - rows.length),
+    rows: rows.map(compactMiddayWeatherOutcome),
+    errors: report.errors,
+    groups: args.reports === true
+      ? report.groups.map(compactMiddayWeatherGroup)
+      : undefined
+  };
+}
+
 function compactTeamRates(teamRates: SoccerScorePrediction["teamRates"]) {
   return {
     home: {
@@ -846,6 +953,7 @@ Commands:
   weather:signals [--limit N] [--max-pages N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N] [--allow-city-forecast]
   weather:edges [--date YYYY-MM-DD | --days-ahead N] [--top N | --all] [--signals-only] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--sizing independent-kelly|city-portfolio] [--max-group-fraction N] [--portfolio-step-usd N] [--no-climatology] [--concurrency N] [--allow-city-forecast] [--allow-started-day] [--high-grace-minutes N] [--low-grace-minutes N]
   weather:tomorrow [--top N | --all] [--signals-only] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--sizing independent-kelly|city-portfolio] [--max-group-fraction N] [--portfolio-step-usd N] [--no-climatology] [--concurrency N] [--allow-started-day]
+  weather:midday (--held-vistadex | --slug SLUG | --slugs SLUG[,SLUG...]) [--date YYYY-MM-DD] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko] [--metar-hours N] [--top N | --all] [--signals-only] [--reports] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N]
   weather:backtest --city CITY [--country CODE] --date YYYY-MM-DD [--measure temperature_high|temperature_low] [--years N] [--threshold N]
   weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--sizing independent-kelly|city-portfolio] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--max-group-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N]
   weather:resolution-audit [--date YYYY-MM-DD | --days-ahead N] [--status active|closed] [--distance-ok-km N] [--distance-warn-km N] [--top N]
@@ -1034,6 +1142,31 @@ async function run(): Promise<void> {
       lowGraceMinutes: numberArg(args, "low-grace-minutes", false)
     });
     print(args.raw === true ? report : compactWeatherEdgeReport(report, args));
+    return;
+  }
+
+  if (command === "weather:midday") {
+    const slugs = [
+      ...listArg(args, "slugs", false),
+      ...listArg(args, "slug", false)
+    ];
+    const sourceArgs = listArg(args, "sources", false);
+    if (slugs.length === 0 && args["held-vistadex"] !== true) {
+      throw new Error("Pass --held-vistadex, --slug, or --slugs.");
+    }
+    const report = await computeVistadexMiddayWeatherReport(config, {
+      date: stringArg(args, "date", false),
+      slugs,
+      heldVistadex: args["held-vistadex"] === true,
+      sources: sourceArgs.length > 0 ? parseWeatherSourceIds(sourceArgs) : undefined,
+      metarHours: numberArg(args, "metar-hours", false),
+      bankrollUsd: numberArg(args, "bankroll", false),
+      maxPerTradeUsd: numberArg(args, "max-per-trade", false) ?? numberArg(args, "max-usd", false),
+      kellyMultiplier: numberArg(args, "kelly-multiplier", false),
+      maxKellyFraction: numberArg(args, "max-kelly-fraction", false),
+      minEdge: numberArg(args, "min-edge", false)
+    });
+    print(args.raw === true ? report : compactMiddayWeatherReport(report, args));
     return;
   }
 

@@ -181,16 +181,33 @@ function dedupeKeyFromExecution(input: ExecutionLedgerInput, ids: LedgerIds): st
       : `vistadex:trade:${hashJson({ ticket: input.ticket, execution: input.execution.details })}`;
 }
 
+function vistadexFillFromExecution(execution: TradeExecution): {
+  price?: number;
+  shares?: number;
+  notionalUsd?: number;
+} {
+  const details = asRecord(execution.details);
+  const winningQuote = asRecord(details.winningQuote);
+  return {
+    price: numberField(winningQuote, ["pricePerShare", "price_per_share"]),
+    shares: numberField(winningQuote, ["shares"]),
+    notionalUsd: numberField(winningQuote, ["totalUsd", "total_usd"])
+  };
+}
+
 export function buildExecutionLedgerRecord(input: ExecutionLedgerInput): LedgerRecord {
   const action = input.action ?? (input.ticket.venue === "polymarket" && "positionId" in input.ticket ? "redeem" : "order");
   const ids = idsFromExecution(input.execution);
   const dedupeKey = dedupeKeyFromExecution({ ...input, action }, ids);
-  const shares = "shares" in input.ticket ? input.ticket.shares : undefined;
-  const price = "price" in input.ticket
+  const fill = input.ticket.venue === "vistadex" ? vistadexFillFromExecution(input.execution) : {};
+  const ticketShares = "shares" in input.ticket ? input.ticket.shares : undefined;
+  const ticketPrice = "price" in input.ticket
     ? input.ticket.price
     : "limitPrice" in input.ticket
       ? input.ticket.limitPrice
       : undefined;
+  const shares = fill.shares ?? ticketShares;
+  const price = fill.price ?? ticketPrice;
 
   return {
     version: 1,
@@ -205,7 +222,7 @@ export function buildExecutionLedgerRecord(input: ExecutionLedgerInput): LedgerR
     side: "side" in input.ticket ? input.ticket.side : undefined,
     price,
     shares,
-    notionalUsd: input.preview.notionalUsd,
+    notionalUsd: fill.notionalUsd ?? input.preview.notionalUsd,
     summary: input.preview.summary,
     market: marketFromTicket(input.ticket),
     ids,

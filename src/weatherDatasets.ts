@@ -22,8 +22,14 @@ import {
   type WeatherEdgeRow
 } from "./weatherEdges.js";
 import {
+  resolvePricingForecastTarget,
+  sourcesForPricingTarget,
+  type WeatherPricingResolutionTarget
+} from "./weatherPricing.js";
+import {
   fetchPolymarketWeatherMarkets,
   type WeatherMarketCandidate,
+  type WeatherMarketGroup,
   type WeatherMeasure,
   type WeatherOutcomeKind
 } from "./weatherMarkets.js";
@@ -109,6 +115,14 @@ export interface WeatherForecastSnapshotRecord {
   date: string;
   measure: WeatherMeasure;
   location?: Pick<WeatherLocation, "name" | "latitude" | "longitude" | "timezone" | "countryCode" | "country" | "admin1">;
+  resolutionTarget?: {
+    matched: boolean;
+    resolutionSource?: string;
+    stationId?: string;
+    stationName?: string;
+    cityDistanceKm?: number;
+    note?: string;
+  };
   ok: boolean;
   skipped?: boolean;
   note?: string;
@@ -437,6 +451,81 @@ export function buildWeatherMarketSnapshotRecords(
   }));
 }
 
+function marketSnapshotToCandidate(record: WeatherMarketSnapshotRecord): WeatherMarketCandidate {
+  return {
+    eventSlug: record.eventSlug,
+    eventTitle: record.eventTitle,
+    eventEndDate: record.eventEndDate,
+    marketSlug: record.marketSlug,
+    question: record.question,
+    resolutionSource: record.resolutionSource,
+    conditionId: record.conditionId,
+    active: record.active,
+    closed: record.closed,
+    acceptingOrders: record.acceptingOrders,
+    negRisk: record.negRisk,
+    bestBid: record.bestBid,
+    bestAsk: record.bestAsk,
+    liquidity: record.liquidity,
+    volume: record.volume,
+    outcomes: record.tokens,
+    parsed: {
+      city: record.city,
+      date: record.date,
+      measure: record.measure,
+      outcome: record.outcome
+    }
+  };
+}
+
+function marketSnapshotGroups(records: WeatherMarketSnapshotRecord[]): WeatherMarketGroup[] {
+  const groups = new Map<string, WeatherMarketGroup>();
+  for (const record of records) {
+    const key = `${record.eventSlug}|${record.city}|${record.date}|${record.measure}`;
+    const existing = groups.get(key);
+    const candidate = marketSnapshotToCandidate(record);
+    if (existing) {
+      existing.markets.push(candidate);
+      continue;
+    }
+
+    groups.set(key, {
+      eventSlug: record.eventSlug,
+      eventTitle: record.eventTitle,
+      eventEndDate: record.eventEndDate,
+      city: record.city,
+      date: record.date,
+      measure: record.measure,
+      markets: [candidate],
+      unparsed: []
+    });
+  }
+  return [...groups.values()];
+}
+
+function compactForecastResolutionTarget(
+  target: WeatherPricingResolutionTarget | undefined
+): WeatherForecastSnapshotRecord["resolutionTarget"] {
+  if (!target) return undefined;
+  return {
+    matched: target.matched,
+    resolutionSource: target.resolutionSource,
+    stationId: target.station?.id,
+    stationName: target.station?.site,
+    cityDistanceKm: target.cityDistanceKm,
+    note: target.note
+  };
+}
+
+function forecastTargetKey(
+  location: WeatherLocation | undefined,
+  target: WeatherPricingResolutionTarget | undefined
+): string {
+  return target?.station?.id ??
+    target?.resolutionSource ??
+    (location ? `${location.latitude.toFixed(4)},${location.longitude.toFixed(4)}` : "unknown");
+}
+
 export function buildWeatherForecastSnapshotRecords(options: {
   marketSnapshotCapturedAt: string;
   forecastCapturedAt: string;
@@ -444,10 +533,12 @@ export function buildWeatherForecastSnapshotRecords(options: {
   countryCode?: string;
   targets: Array<{ date: string; measure: WeatherMeasure }>;
   location?: WeatherLocation;
+  resolutionTarget?: WeatherPricingResolutionTarget;
   results: WeatherSourceResult[];
 }): WeatherForecastSnapshotRecord[] {
   return options.results.flatMap((result) => {
     const sourceLocation = result.location ?? options.location;
+    const targetKey = forecastTargetKey(sourceLocation, options.resolutionTarget);
     return options.targets.map((target) => {
       const dailyPoint = result.daily?.find((point) => point.date === target.date);
       const hourlyPoints = (result.hourly ?? []).filter((point) => point.time.slice(0, 10) === target.date);
@@ -456,6 +547,7 @@ export function buildWeatherForecastSnapshotRecords(options: {
           "weather_forecast",
           options.marketSnapshotCapturedAt,
           options.forecastCapturedAt,
+          targetKey,
           options.city,
           target.date,
           target.measure,
@@ -481,6 +573,7 @@ export function buildWeatherForecastSnapshotRecords(options: {
             admin1: sourceLocation.admin1
           }
           : undefined,
+        resolutionTarget: compactForecastResolutionTarget(options.resolutionTarget),
         ok: result.ok,
         skipped: result.skipped,
         note: result.note,
@@ -770,43 +863,44 @@ export async function collectWeatherForecastSnapshotsDataset(
     throw new Error(`No market snapshot records found for capturedAt ${marketSnapshotCapturedAt}.`);
   }
 
-  const targetsByCity = new Map<string, Array<{ date: string; measure: WeatherMeasure }>>();
-  for (const record of selected) {
-    const targets = targetsByCity.get(record.city) ?? [];
-    if (!targets.some((target) => target.date === record.date && target.measure === record.measure)) {
-      targets.push({ date: record.date, measure: record.measure });
-    }
-    targetsByCity.set(record.city, targets);
-  }
-
-  const cities = [...targetsByCity.keys()].sort().slice(0, options.maxCities);
+  const allGroups = marketSnapshotGroups(selected);
+  const cities = [...new Set(allGroups.map((group) => group.city))].sort().slice(0, options.maxCities);
+  const selectedCities = new Set(cities);
+  const groups = allGroups.filter((group) => selectedCities.has(group.city));
   const forecastCapturedAt = options.forecastCapturedAt ?? new Date().toISOString();
   const sourceIds = options.sources ?? ["openmeteo_gfs", "openmeteo_ecmwf", "openmeteo_ukmo", "nws", "hko"];
   const records: WeatherForecastSnapshotRecord[] = [];
   const errors: Array<{ city: string; error: string }> = [];
 
-  for (const city of cities) {
-    const targets = targetsByCity.get(city) ?? [];
+  for (const group of groups) {
     try {
-      const countryCode = options.countryCodes?.[city] ?? DEFAULT_WEATHER_MARKET_COUNTRY_CODES[city];
+      const countryCode = options.countryCodes?.[group.city] ?? DEFAULT_WEATHER_MARKET_COUNTRY_CODES[group.city];
+      const forecastTarget = await resolvePricingForecastTarget(config, group, { countryCode });
+      if (forecastTarget.strictError) {
+        errors.push({ city: group.city, error: forecastTarget.strictError });
+        continue;
+      }
       const report = await fetchWeatherEdgeSources(config, {
-        city,
-        countryCode,
-        days: forecastDaysForTargets(targets.map((target) => target.date)),
-        sources: sourceIds
+        city: forecastTarget.location.name,
+        countryCode: forecastTarget.location.countryCode ?? countryCode,
+        latitude: forecastTarget.location.latitude,
+        longitude: forecastTarget.location.longitude,
+        days: forecastDaysForTargets([group.date]),
+        sources: sourcesForPricingTarget(forecastTarget.resolutionTarget, sourceIds)
       });
       records.push(...buildWeatherForecastSnapshotRecords({
         marketSnapshotCapturedAt,
         forecastCapturedAt,
-        city,
+        city: group.city,
         countryCode,
-        targets,
-        location: report.location,
+        targets: [{ date: group.date, measure: group.measure }],
+        location: forecastTarget.location,
+        resolutionTarget: forecastTarget.resolutionTarget,
         results: report.results
       }));
     } catch (error) {
       errors.push({
-        city,
+        city: group.city,
         error: error instanceof Error ? error.message : String(error)
       });
     }
@@ -822,7 +916,7 @@ export async function collectWeatherForecastSnapshotsDataset(
     forecastCapturedAt,
     marketSnapshotCapturedAt,
     scannedMarketRecords: selected.length,
-    targetGroups: [...targetsByCity.values()].reduce((sum, targets) => sum + targets.length, 0),
+    targetGroups: groups.length,
     cityCount: cities.length,
     sourceIds,
     write,

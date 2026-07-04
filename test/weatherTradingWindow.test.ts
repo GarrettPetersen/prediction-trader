@@ -12,6 +12,12 @@ describe("weather trading window", () => {
     assert.equal(inferWeatherTimeZone({ countryCode: "US", longitude: -122.38 }), "America/Los_Angeles");
   });
 
+  it("infers major Asia market timezones from country codes", () => {
+    assert.equal(inferWeatherTimeZone({ countryCode: "CN" }), "Asia/Shanghai");
+    assert.equal(inferWeatherTimeZone({ countryCode: "HK" }), "Asia/Hong_Kong");
+    assert.equal(inferWeatherTimeZone({ countryCode: "KR" }), "Asia/Seoul");
+  });
+
   it("allows markets before the target day in the market-local timezone", () => {
     const assessment = assessWeatherTradingWindow({
       targetDate: "2026-07-04",

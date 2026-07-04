@@ -237,7 +237,8 @@ function sanitizeVistadexTradeResult(response: any) {
 }
 
 export function previewVistadexTrade(ticket: VistadexTradeTicket): TradePreview {
-  const notionalUsd = ticket.amountUsd ?? 0;
+  const notionalUsd = ticket.amountUsd ??
+    (ticket.shares !== undefined && ticket.limitPrice !== undefined ? ticket.shares * ticket.limitPrice : 0);
   const sizeDescription = ticket.amountUsd
     ? `$${ticket.amountUsd.toFixed(2)}`
     : `${ticket.shares} shares`;

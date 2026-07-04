@@ -234,6 +234,28 @@ npm run weather:sources -- \
   --sources hko
 ```
 
+Smoke-test the global model stack on European or Asian cities:
+
+```bash
+npm run weather:sources -- \
+  --city Paris \
+  --country FR \
+  --days 2 \
+  --sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo
+
+npm run weather:sources -- \
+  --city Beijing \
+  --country CN \
+  --days 2 \
+  --sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo
+
+npm run weather:sources -- \
+  --city "Hong Kong" \
+  --country HK \
+  --days 2 \
+  --sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,hko
+```
+
 Use NOAA NCEI once you have a CDO token:
 
 ```bash
@@ -272,7 +294,8 @@ The RainBot-style pipeline is CLI-first and review-first:
 
 1. Discover Polymarket weather events.
 2. Parse city, date, market type, and temperature outcome bins.
-3. Pull GFS, ECMWF, UKMO, NWS/HKO where applicable, plus NOAA NCEI history.
+3. Resolve the market's settlement feed/station, then pull GFS, ECMWF, UKMO,
+   NWS/HKO where applicable for that target, plus NOAA NCEI history.
 4. Build a weighted consensus forecast.
 5. Blend in a 10-year same-calendar-date NOAA prior when available.
 6. Price each outcome with a Normal CDF.
@@ -344,6 +367,42 @@ npm run weather:edges -- \
   --kelly-multiplier 0.25 \
   --all
 ```
+
+Price same-day Vistadex weather ladders after the local day has started:
+
+```bash
+npm run weather:midday -- \
+  --held-vistadex \
+  --date 2026-07-04 \
+  --bankroll 50 \
+  --max-per-trade 5 \
+  --kelly-multiplier 0.25 \
+  --top 50
+```
+
+`weather:midday` is a read-only scanner for partially complete station-day
+weather markets. It fetches the Vistadex event metadata for either
+`--held-vistadex` positions or explicit `--slug/--slugs`, extracts the
+Wunderground station from the resolution source, pulls same-day METAR
+observations from AviationWeather when a station is available, and combines
+the observed high/low so far with remaining-hour GFS, ECMWF, UKMO, and NWS
+forecasts for that station. Hong Kong markets can also use the Hong Kong
+Observatory, but only when the market explicitly references HKO, Hong Kong
+Observatory, or weather.gov.hk; then HKO daily forecasts participate even
+though they are not hourly, and HKO current readings are the same-day observed
+feed. For high-temperature markets, a bin whose upper edge has already been
+crossed is priced at zero; for low-temperature markets, a bin whose lower edge
+has already been crossed is priced at zero. The output ranks YES/NO edges and
+fractional-Kelly sizes, but it does not quote or execute trades. Always request
+a venue quote before trading because the displayed event price can differ from
+the executable RFQ.
+
+For Europe/Asia, be explicit about the market-local date. From British
+Columbia, Hong Kong, Beijing, Seoul, Singapore, and Tokyo are often already on
+the next calendar day, so `--date 2026-07-05` may be the correct "tomorrow"
+while the local machine still says July 4. Day-ahead pricing infers timezones
+for major Asia-Pacific country codes including `CN`, `HK`, `JP`, `KR`, `SG`,
+`TW`, `TH`, `VN`, `MY`, `PH`, `ID`, `IN`, `AE`, `AU`, and `NZ`.
 
 For same-city ladders, portfolio-aware sizing can be more honest than ranked
 per-market Kelly. It evaluates all candidate YES/NO positions against the same
@@ -433,10 +492,14 @@ Snapshot provider forecasts for the latest saved market snapshot:
 npm run weather:dataset:forecasts
 ```
 
-That command reads the latest `WEATHER_MARKET_SNAPSHOTS_PATH`, groups it by
-city/date/measure, then saves per-provider forecast values from GFS, ECMWF,
-UKMO, NWS where applicable, and HKO where applicable. Each forecast record is
-keyed to the market snapshot timestamp so later backtests can join:
+That command reads the latest `WEATHER_MARKET_SNAPSHOTS_PATH`, reconstructs
+each city/date/measure market group, resolves its settlement station/feed, then
+saves per-provider forecast values for that exact target. Wunderground station
+markets use station coordinates; explicit HKO markets use the Hong Kong
+Observatory target; markets without a usable station/feed are skipped instead
+of silently falling back to city coordinates. Each forecast record is keyed to
+the market snapshot timestamp and includes compact `resolutionTarget` metadata
+so later backtests can join:
 
 ```text
 market price at T + provider forecast at T + actual observed weather after resolution
@@ -453,10 +516,11 @@ npm run weather:dataset:previous-runs -- \
 ```
 
 This uses Open-Meteo's Previous Model Runs API, not the normal historical
-weather API. For each city/date/source/lead-time it stores the forecast value
-that the model predicted before valid time, such as `leadDays=1` for the value
-predicted roughly 24 hours earlier. That is the dataset to use for honest
-forecast-skill backtests against later NOAA observations.
+weather API. The current command is still city-list based, so treat it as a
+forecast-calibration dataset until it is extended to resolve the same
+station/feed targets used by live pricing. For each location/date/source/lead
+time it stores the forecast value that the model predicted before valid time,
+such as `leadDays=1` for the value predicted roughly 24 hours earlier.
 
 Run a resolved-market strategy backtest for a specific date:
 
@@ -516,18 +580,20 @@ npm run weather:resolution-audit -- \
 ```
 
 This command compares each Polymarket weather event's exposed resolution source
-against the city-level forecast target we currently use. Wunderground
-station-based markets such as `KLAX`, `KSEA`, or `KLGA` are flagged when the
-city geocode is materially away from the settlement station. Treat
-`CITY_FORECAST_MISMATCH`, `STATION_COORDS_MISSING`, and
-`MISSING_RESOLUTION_SOURCE` rows as manual-review blockers before trading.
+against the display city. Wunderground station-based markets such as `KLAX`,
+`KSEA`, or `KLGA` are flagged when the city geocode is materially away from the
+settlement station. Live pricing uses the station/feed target, not the display
+city, and treats `STATION_COORDS_MISSING` and `MISSING_RESOLUTION_SOURCE` rows
+as blockers unless you explicitly opt into city-forecast research mode.
 
-Live weather pricing is now strict by default: if a Polymarket weather market
-exposes a Wunderground station such as `KLAX`, `KATL`, or `EHAM`, the forecast
-is pulled for that station's coordinates instead of the display city. The
-pricing output includes `resolution.matched`, `stationId`, and
-`cityDistanceKm` for every signal. Markets without a usable station resolution
-source are not priced unless you explicitly pass `--allow-city-forecast`.
+Live weather pricing is strict by default: if a Polymarket weather market
+exposes a Wunderground station such as `KLAX`, `KATL`, `EHAM`, or `ZBAA`, the
+forecast is pulled for that station's coordinates instead of the display city.
+If the market explicitly resolves to HKO/Hong Kong Observatory/weather.gov.hk,
+the forecast target is HKO. The pricing output includes `resolution.matched`,
+`stationId`, and `cityDistanceKm` for every signal. Markets without a usable
+station/feed resolution source are not priced unless you explicitly pass
+`--allow-city-forecast`.
 Historical previous-run backtests should be refreshed with station-coordinate
 datasets before being treated as production evidence; old rows collected by
 city name are useful only for rough model development.
@@ -564,8 +630,10 @@ Current WeatherEdge limits:
 - Polymarket weather discovery uses the public Gamma `weather` tag and keyword
   shape checks. If Gamma tagging changes, use `--include-unparsed` to inspect
   misses.
-- Forecast pricing does not yet use live observed running highs except for the
-  HKO current reading surface exposed by `weather:sources`.
+- Day-ahead forecast pricing does not use live observed running highs. Use
+  `weather:midday` for same-day station markets: AviationWeather METARs cover
+  Wunderground-style station resolution where available, and HKO covers markets
+  that explicitly resolve to Hong Kong Observatory/HKO/weather.gov.hk.
 - Market backtests now use Open-Meteo previous-run forecasts plus NOAA actuals,
   but international city settlement coverage is still incomplete and execution
   modeling is intentionally conservative research scaffolding, not a fill

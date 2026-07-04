@@ -83,4 +83,43 @@ describe("trade ledger", () => {
     assert.equal(summary.byAction.order, 1);
     assert.equal(summary.estimatedNotionalUsd, 5);
   });
+
+  it("records Vistadex fill economics from the winning quote", () => {
+    const record = buildExecutionLedgerRecord({
+      command: "vistadex:trade",
+      ticket: {
+        venue: "vistadex",
+        side: "sell",
+        conditionId: "0xcondition",
+        outcomeIndex: 1,
+        shares: 21.2,
+        limitPrice: 0.99
+      },
+      preview: {
+        venue: "vistadex",
+        summary: "SELL 21.2 shares on condition 0xcondition, outcome 1",
+        notionalUsd: 20.988,
+        details: {}
+      },
+      execution: {
+        venue: "vistadex",
+        status: "filled",
+        details: {
+          rfqId: "rfq_123",
+          transactionSignature: "sig_123",
+          winningQuote: {
+            pricePerShare: 0.9989,
+            shares: 21.2,
+            totalUsd: 21.17668
+          }
+        }
+      },
+      recordedAt: "2026-07-04T00:00:00.000Z"
+    });
+
+    assert.equal(record.dedupeKey, "vistadex:trade:sig_123");
+    assert.equal(record.price, 0.9989);
+    assert.equal(record.shares, 21.2);
+    assert.equal(record.notionalUsd, 21.17668);
+  });
 });

@@ -29,6 +29,7 @@
     "weather:signals": "node --import tsx src/cli.ts weather:signals",
     "weather:edges": "node --import tsx src/cli.ts weather:edges",
     "weather:tomorrow": "node --import tsx src/cli.ts weather:tomorrow",
+    "weather:midday": "node --import tsx src/cli.ts weather:midday",
     "weather:backtest": "node --import tsx src/cli.ts weather:backtest",
     "weather:backtest:markets": "node --import tsx src/cli.ts weather:backtest:markets",
     "weather:resolution-audit": "node --import tsx src/cli.ts weather:resolution-audit",

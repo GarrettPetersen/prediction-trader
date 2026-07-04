@@ -18,6 +18,7 @@ import {
   distanceKm,
   resolveStationForecastTarget,
   type ParsedResolutionSource,
+  type WeatherStationForecastTarget,
   type WeatherStationInfo
 } from "./weatherStations.js";
 import { sizeBinaryKellyBet } from "./kelly.js";
@@ -125,6 +126,22 @@ const BASE_WEIGHTS: Record<WeatherSourceId, number> = {
   nws: 0.2,
   hko: 0.5,
   noaa_ncei: 0
+};
+
+const DAY_AHEAD_SOURCES: WeatherSourceId[] = [
+  "openmeteo_gfs",
+  "openmeteo_ecmwf",
+  "openmeteo_ukmo",
+  "nws",
+  "hko"
+];
+
+const HONG_KONG_OBSERVATORY_STATION: WeatherStationInfo = {
+  id: "HKO",
+  site: "Hong Kong Observatory",
+  latitude: 22.3027,
+  longitude: 114.1772,
+  country: "HK"
 };
 
 function mean(values: number[]): number {
@@ -334,6 +351,61 @@ function compactLocation(location: WeatherLocation): WeatherPricingResolutionTar
   };
 }
 
+function looksLikeHkoText(value: string | undefined): boolean {
+  return /hong\s*kong\s+observatory|\bhko\b|weather\.gov\.hk/i.test(value ?? "");
+}
+
+function looksLikeHkoSettlementGroup(group: WeatherMarketGroup): boolean {
+  return looksLikeHkoText(group.eventTitle) ||
+    group.markets.some((market) =>
+      looksLikeHkoText(market.resolutionSource) ||
+      looksLikeHkoText(market.question)
+    );
+}
+
+function hkoForecastLocation(): WeatherLocation {
+  return {
+    name: "Hong Kong Observatory",
+    latitude: HONG_KONG_OBSERVATORY_STATION.latitude,
+    longitude: HONG_KONG_OBSERVATORY_STATION.longitude,
+    timezone: "Asia/Hong_Kong",
+    countryCode: "HK",
+    country: "HK"
+  };
+}
+
+function hongKongFallbackTarget(
+  group: WeatherMarketGroup,
+  target: WeatherStationForecastTarget
+): WeatherStationForecastTarget | undefined {
+  if (!looksLikeHkoSettlementGroup(group)) return undefined;
+  return {
+    resolutionSource: target.resolutionSource,
+    resolution: target.resolution,
+    station: HONG_KONG_OBSERVATORY_STATION,
+    location: hkoForecastLocation(),
+    matched: true,
+    note: target.note
+      ? `${target.note} Using Hong Kong Observatory because the market explicitly references HKO.`
+      : "Using Hong Kong Observatory because the market explicitly references HKO."
+  };
+}
+
+function isHkoResolutionTarget(target: WeatherPricingResolutionTarget): boolean {
+  return target.station?.id.toUpperCase() === "HKO" ||
+    looksLikeHkoText(target.resolutionSource);
+}
+
+export function sourcesForPricingTarget(
+  target: WeatherPricingResolutionTarget,
+  requestedSources?: WeatherSourceId[]
+): WeatherSourceId[] {
+  const sources = requestedSources ?? DAY_AHEAD_SOURCES;
+  return isHkoResolutionTarget(target)
+    ? sources
+    : sources.filter((source) => source !== "hko");
+}
+
 function priceCandidate(
   candidate: WeatherMarketCandidate,
   consensus: WeatherConsensus,
@@ -465,7 +537,7 @@ function applyCityPortfolioSizing(
   });
 }
 
-async function resolvePricingForecastTarget(
+export async function resolvePricingForecastTarget(
   config: AppConfig,
   group: WeatherMarketGroup,
   options: WeatherPricingOptions
@@ -474,12 +546,18 @@ async function resolvePricingForecastTarget(
   resolutionTarget: WeatherPricingResolutionTarget;
   strictError?: string;
 }> {
-  const stationTarget = await resolveStationForecastTarget(group);
+  let stationTarget = await resolveStationForecastTarget(group);
+  if (!stationTarget.location) {
+    stationTarget = hongKongFallbackTarget(group, stationTarget) ?? stationTarget;
+  }
+
   if (stationTarget.location) {
-    const cityLocation = await resolveWeatherLocation(config, {
-      city: group.city,
-      countryCode: options.countryCode
-    }).catch(() => undefined);
+    const cityLocation = stationTarget.station?.id.toUpperCase() === "HKO"
+      ? undefined
+      : await resolveWeatherLocation(config, {
+        city: group.city,
+        countryCode: options.countryCode
+      }).catch(() => undefined);
     return {
       location: stationTarget.location,
       resolutionTarget: {
@@ -495,7 +573,7 @@ async function resolvePricingForecastTarget(
             { latitude: stationTarget.station.latitude, longitude: stationTarget.station.longitude }
           )
           : undefined,
-        note: `Forecasting at resolution station ${stationTarget.resolution.stationId}.`
+        note: stationTarget.note ?? `Forecasting at resolution station ${stationTarget.resolution.stationId ?? stationTarget.station?.id}.`
       }
     };
   }
@@ -528,8 +606,8 @@ export async function priceWeatherMarketGroup(
   const days = Number.isFinite(targetTime)
     ? clamp(Math.ceil((targetTime - Date.now()) / 86_400_000) + 1, 1, 16)
     : 7;
-  const sources: WeatherSourceId[] = ["openmeteo_gfs", "openmeteo_ecmwf", "openmeteo_ukmo", "nws", "hko"];
   const forecastTarget = await resolvePricingForecastTarget(config, group, options);
+  const sources = sourcesForPricingTarget(forecastTarget.resolutionTarget);
   const forecastReport = forecastTarget.strictError
     ? {
       location: forecastTarget.location,
