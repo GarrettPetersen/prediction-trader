@@ -201,6 +201,10 @@ layer connects to those source families through public/user-accessible APIs:
   with `TMAX` coverage; use `--ncei-location` or `--ncei-station` to force a
   known CDO id.
 
+WeatherEdge research notes:
+
+- [Seven-day weather backtest, 2026-06-24 to 2026-06-30](docs/weather-edge-backtest-2026-06-24-to-30.md)
+
 Pull all applicable sources for Vancouver:
 
 ```bash
