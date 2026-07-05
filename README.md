@@ -377,6 +377,7 @@ npm run weather:midday -- \
   --bankroll 50 \
   --max-per-trade 5 \
   --kelly-multiplier 0.25 \
+  --resolution-actuals \
   --top 50
 ```
 
@@ -392,10 +393,21 @@ Observatory, or weather.gov.hk; then HKO daily forecasts participate even
 though they are not hourly, and HKO current readings are the same-day observed
 feed. For high-temperature markets, a bin whose upper edge has already been
 crossed is priced at zero; for low-temperature markets, a bin whose lower edge
-has already been crossed is priced at zero. The output ranks YES/NO edges and
-fractional-Kelly sizes, but it does not quote or execute trades. Always request
-a venue quote before trading because the displayed event price can differ from
-the executable RFQ.
+has already been crossed is priced at zero. When no forecast hours remain in
+the local station day, the observed station extreme deterministically locks the
+outcome instead of leaving a residual model probability. Intraday BUY signals
+are skipped unless same-day resolution-station observations are present.
+
+Pass `--reports --resolution-actuals` to include a resolution-source check in
+each group. The check confirms the forecast coordinates are at the settlement
+station, reports per-source distance from that station, and makes a best-effort
+fetch of the dated Wunderground history page so forecast/observed values can be
+compared against the exact settlement-source daily high/low. If the
+Wunderground page payload cannot be parsed, the check reports that explicitly
+rather than substituting a nearby NOAA or METAR feed as if it were exact. The
+output ranks YES/NO edges and fractional-Kelly sizes, but it does not quote or
+execute trades. Always request a venue quote before trading because the
+displayed event price can differ from the executable RFQ.
 
 For Europe/Asia, be explicit about the market-local date. From British
 Columbia, Hong Kong, Beijing, Seoul, Singapore, and Tokyo are often already on
@@ -504,6 +516,26 @@ so later backtests can join:
 ```text
 market price at T + provider forecast at T + actual observed weather after resolution
 ```
+
+After the market day has mostly or fully finished, snapshot settlement-source
+actuals and free-feed comparisons for the same market snapshot:
+
+```bash
+npm run weather:dataset:resolution-actuals -- \
+  --date 2026-07-04 \
+  --metar-hours 72
+```
+
+This reads the latest saved market snapshot, resolves each market group to its
+Wunderground settlement station, and writes records to
+`WEATHER_RESOLUTION_ACTUALS_PATH`. Each record stores:
+
+- A best-effort parse of the dated Wunderground daily history page.
+- The free AviationWeather METAR station-day high/low for the same station.
+- Per-bucket `wundergroundYes` and `metarYes` flags so we can see whether the
+  free feed would resolve the market the same way as the settlement page.
+- Warnings when the exact Wunderground page cannot be parsed or when the METAR
+  extreme differs materially from the parsed settlement value.
 
 Collect historical day-ahead forecasts for dates that have already happened:
 
@@ -633,7 +665,10 @@ Current WeatherEdge limits:
 - Day-ahead forecast pricing does not use live observed running highs. Use
   `weather:midday` for same-day station markets: AviationWeather METARs cover
   Wunderground-style station resolution where available, and HKO covers markets
-  that explicitly resolve to Hong Kong Observatory/HKO/weather.gov.hk.
+  that explicitly resolve to Hong Kong Observatory/HKO/weather.gov.hk. If
+  `weather:edges --allow-started-day` is used for inspection, rows from
+  already-started market-local days are downgraded to `SKIP`; use
+  `weather:midday` for actual intraday signal generation.
 - Market backtests now use Open-Meteo previous-run forecasts plus NOAA actuals,
   but international city settlement coverage is still incomplete and execution
   modeling is intentionally conservative research scaffolding, not a fill

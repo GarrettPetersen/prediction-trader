@@ -58,6 +58,10 @@ const envSchema = z.object({
   WEATHER_BACKTEST_RUNS_PATH: z.preprocess(
     emptyToUndefined,
     z.string().default("data/weather/backtests/weatheredge-runs.jsonl")
+  ),
+  WEATHER_RESOLUTION_ACTUALS_PATH: z.preprocess(
+    emptyToUndefined,
+    z.string().default("data/weather/resolution/weather-resolution-actuals.jsonl")
   )
 });
 
@@ -115,7 +119,8 @@ export function loadConfig(overrides: Record<string, string | undefined> = {}) {
         marketSnapshotsPath: parsed.WEATHER_MARKET_SNAPSHOTS_PATH,
         forecastSnapshotsPath: parsed.WEATHER_FORECAST_SNAPSHOTS_PATH,
         previousRunForecastsPath: parsed.WEATHER_PREVIOUS_RUN_FORECASTS_PATH,
-        backtestRunsPath: parsed.WEATHER_BACKTEST_RUNS_PATH
+        backtestRunsPath: parsed.WEATHER_BACKTEST_RUNS_PATH,
+        resolutionActualsPath: parsed.WEATHER_RESOLUTION_ACTUALS_PATH
       }
     }
   };

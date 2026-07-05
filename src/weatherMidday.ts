@@ -22,6 +22,11 @@ import {
   probabilityInRange
 } from "./weatherPricing.js";
 import {
+  fetchWundergroundDailyActual,
+  type WeatherResolutionDailyActual
+} from "./weatherResolutionData.js";
+import {
+  distanceKm,
   resolveStationForecastTarget,
   type WeatherStationForecastTarget,
   type WeatherStationInfo
@@ -106,6 +111,35 @@ export interface MiddayPricingOptions {
   kellyMultiplier?: number;
   maxKellyFraction?: number;
   minEdge?: number;
+  fetchResolutionActuals?: boolean;
+}
+
+export interface MiddaySourceResolutionComparison {
+  source: WeatherSourceId;
+  provider: string;
+  ok: boolean;
+  skipped?: boolean;
+  forecastLocationDistanceKm?: number;
+  forecastExtremeC?: number;
+  deltaToResolutionC?: number;
+  note?: string;
+  error?: string;
+}
+
+export interface MiddayResolutionCheck {
+  resolutionSource?: string;
+  provider: string;
+  stationId?: string;
+  stationName?: string;
+  forecastLocationDistanceKm?: number;
+  observationStationId?: string;
+  observationCount: number;
+  exactActual?: WeatherResolutionDailyActual;
+  observedExtremeDeltaC?: number;
+  forecastMeanDeltaC?: number;
+  finalMeanDeltaC?: number;
+  sourceComparisons: MiddaySourceResolutionComparison[];
+  warnings: string[];
 }
 
 export interface MiddayWeatherOutcomePricing {
@@ -154,6 +188,7 @@ export interface MiddayWeatherGroupReport {
   location?: WeatherLocation;
   observation?: MiddayStationObservation;
   consensus?: MiddayWeatherConsensus;
+  resolutionCheck?: MiddayResolutionCheck;
   sourceSummary: Array<Pick<WeatherSourceResult, "source" | "provider" | "ok" | "skipped" | "note" | "error">>;
   outcomes: MiddayWeatherOutcomePricing[];
   errors: string[];
@@ -289,6 +324,16 @@ function dailyExtremeForMeasure(
 ): number | undefined {
   if (!point) return undefined;
   return measure === "temperature_high" ? point.maxTempC : point.minTempC;
+}
+
+function sourceExtremeForMeasure(
+  result: WeatherSourceResult,
+  date: string,
+  measure: WeatherMeasure,
+  timezone: string,
+  now: Date
+): number | undefined {
+  return forecastExtremeForSource(result, date, measure, timezone, now)?.valueC;
 }
 
 function remainingHoursInLocalDay(now: Date, timezone: string, targetDate: string): number {
@@ -575,7 +620,10 @@ export function buildMiddayConsensus(input: {
 }
 
 export function partialDayProbabilityInRange(
-  consensus: Pick<MiddayWeatherConsensus, "measure" | "observedExtremeC" | "forecastExtremeMeanC" | "sigmaC">,
+  consensus: Pick<
+    MiddayWeatherConsensus,
+    "measure" | "observedExtremeC" | "forecastExtremeMeanC" | "sigmaC" | "remainingHourCount"
+  >,
   lowerC?: number,
   upperC?: number
 ): number {
@@ -583,9 +631,13 @@ export function partialDayProbabilityInRange(
   if (observed === undefined) {
     return probabilityInRange(consensus.forecastExtremeMeanC, consensus.sigmaC, lowerC, upperC);
   }
+  const noRemainingHours = consensus.remainingHourCount <= 0;
+  const observedInsideRange = (lowerC === undefined || observed >= lowerC) &&
+    (upperC === undefined || observed < upperC);
 
   if (consensus.measure === "temperature_high") {
     if (upperC !== undefined && observed >= upperC) return 0;
+    if (noRemainingHours) return observedInsideRange ? 1 : 0;
     if (lowerC !== undefined && observed < lowerC) {
       return probabilityInRange(consensus.forecastExtremeMeanC, consensus.sigmaC, lowerC, upperC);
     }
@@ -594,6 +646,7 @@ export function partialDayProbabilityInRange(
   }
 
   if (lowerC !== undefined && observed < lowerC) return 0;
+  if (noRemainingHours) return observedInsideRange ? 1 : 0;
   if (upperC !== undefined && observed >= upperC) {
     return probabilityInRange(consensus.forecastExtremeMeanC, consensus.sigmaC, lowerC, upperC);
   }
@@ -608,15 +661,19 @@ function lockedByObservation(
 ): "YES" | "NO" | undefined {
   const observed = consensus.observedExtremeC;
   if (observed === undefined) return undefined;
+  const observedInsideRange = (lowerC === undefined || observed >= lowerC) &&
+    (upperC === undefined || observed < upperC);
 
   if (consensus.measure === "temperature_high") {
     if (upperC !== undefined && observed >= upperC) return "NO";
     if (lowerC !== undefined && observed >= lowerC && upperC === undefined) return "YES";
+    if (consensus.remainingHourCount <= 0) return observedInsideRange ? "YES" : "NO";
     return undefined;
   }
 
   if (lowerC !== undefined && observed < lowerC) return "NO";
   if (upperC !== undefined && observed < upperC && lowerC === undefined) return "YES";
+  if (consensus.remainingHourCount <= 0) return observedInsideRange ? "YES" : "NO";
   return undefined;
 }
 
@@ -643,7 +700,13 @@ function priceMiddayCandidate(
   const edge = side === "YES" ? yesEdge : noEdge;
   const price = side === "YES" ? yesAsk : noAsk;
   const threshold = dynamicMiddayEdgeThreshold(consensus.sigmaC, options.minEdge);
-  const signal = edge !== undefined && price !== undefined && edge >= threshold
+  const lock = lockedByObservation(
+    consensus,
+    candidate.parsed.outcome.lowerTempC,
+    candidate.parsed.outcome.upperTempC
+  );
+  const hasStationObservations = consensus.observation.observationCount > 0;
+  const signal = hasStationObservations && edge !== undefined && price !== undefined && edge >= threshold
     ? side === "YES" ? "BUY_YES" : "BUY_NO"
     : "SKIP";
   const probability = side === "YES" ? fairYes : fairNo;
@@ -684,15 +747,102 @@ function priceMiddayCandidate(
     kellyFraction: sizing.kellyFraction,
     suggestedSizeUsd: sizing.stakeUsd,
     confidence: confidenceForConsensus(consensus),
-    lockedByObservation: lockedByObservation(
-      consensus,
-      candidate.parsed.outcome.lowerTempC,
-      candidate.parsed.outcome.upperTempC
-    ),
+    lockedByObservation: lock,
     held,
-    reason: signal === "SKIP"
+    reason: !hasStationObservations
+      ? "No same-day resolution-station observations were available; skipping intraday signal."
+      : signal === "SKIP"
       ? `Best edge ${(edge ?? 0).toFixed(3)} is below threshold ${threshold.toFixed(3)}.`
       : `${signal} edge ${(edge ?? 0).toFixed(3)} >= threshold ${threshold.toFixed(3)}.`
+  };
+}
+
+async function buildMiddayResolutionCheck(input: {
+  config: AppConfig;
+  group: WeatherMarketGroup;
+  target: WeatherStationForecastTarget;
+  station: WeatherStationInfo;
+  location: WeatherLocation;
+  observation: MiddayStationObservation;
+  consensus: MiddayWeatherConsensus;
+  sourceResults: WeatherSourceResult[];
+  fetchResolutionActuals?: boolean;
+  now: Date;
+}): Promise<MiddayResolutionCheck> {
+  const forecastLocationDistanceKm = distanceKm(input.location, input.station);
+  const warnings: string[] = [];
+  if (forecastLocationDistanceKm > 0.25) {
+    warnings.push(`Forecast location is ${forecastLocationDistanceKm.toFixed(2)} km from station ${input.station.id}.`);
+  }
+  if (input.observation.observationCount === 0) {
+    warnings.push(`No same-day observations found for station ${input.station.id}.`);
+  }
+
+  const unitHint = input.group.markets[0]?.parsed.outcome.unit;
+  const exactActual = input.fetchResolutionActuals
+    ? await fetchWundergroundDailyActual(
+      input.config,
+      input.target.resolution,
+      input.group.date,
+      { unitHint }
+    )
+    : undefined;
+  if (exactActual && !exactActual.ok) {
+    warnings.push(exactActual.error ?? exactActual.note ?? "Exact Wunderground resolution actual was unavailable.");
+  }
+
+  const actualExtremeC = exactActual?.ok
+    ? input.group.measure === "temperature_high" ? exactActual.maxTempC : exactActual.minTempC
+    : undefined;
+  const sourceComparisons = input.sourceResults.map((result) => {
+    const forecastExtremeC = sourceExtremeForMeasure(
+      result,
+      input.group.date,
+      input.group.measure,
+      input.consensus.timezone,
+      input.now
+    );
+    const sourceDistance = result.location
+      ? distanceKm(result.location, input.station)
+      : undefined;
+    if (sourceDistance !== undefined && sourceDistance > 2) {
+      warnings.push(`${result.source} forecast location is ${sourceDistance.toFixed(1)} km from station ${input.station.id}.`);
+    }
+    return {
+      source: result.source,
+      provider: result.provider,
+      ok: result.ok,
+      skipped: result.skipped,
+      forecastLocationDistanceKm: sourceDistance,
+      forecastExtremeC,
+      deltaToResolutionC: actualExtremeC === undefined || forecastExtremeC === undefined
+        ? undefined
+        : forecastExtremeC - actualExtremeC,
+      note: result.note,
+      error: result.error
+    };
+  });
+
+  return {
+    resolutionSource: input.target.resolutionSource,
+    provider: input.target.resolution.provider,
+    stationId: input.station.id,
+    stationName: input.station.site,
+    forecastLocationDistanceKm,
+    observationStationId: input.observation.stationId,
+    observationCount: input.observation.observationCount,
+    exactActual,
+    observedExtremeDeltaC: actualExtremeC === undefined || input.consensus.observedExtremeC === undefined
+      ? undefined
+      : input.consensus.observedExtremeC - actualExtremeC,
+    forecastMeanDeltaC: actualExtremeC === undefined
+      ? undefined
+      : input.consensus.forecastExtremeMeanC - actualExtremeC,
+    finalMeanDeltaC: actualExtremeC === undefined
+      ? undefined
+      : input.consensus.finalMeanC - actualExtremeC,
+    sourceComparisons,
+    warnings: [...new Set(warnings)]
   };
 }
 
@@ -854,6 +1004,18 @@ async function priceMiddayWeatherGroup(
     sourceResults: sourcesReport.results,
     now: options.now
   });
+  const resolutionCheck = await buildMiddayResolutionCheck({
+    config,
+    group,
+    target,
+    station,
+    location,
+    observation,
+    consensus,
+    sourceResults: sourcesReport.results,
+    fetchResolutionActuals: options.fetchResolutionActuals,
+    now: options.now ?? new Date()
+  });
 
   return {
     group: groupSummary(group),
@@ -862,6 +1024,7 @@ async function priceMiddayWeatherGroup(
     location,
     observation,
     consensus,
+    resolutionCheck,
     sourceSummary,
     outcomes: group.markets.map((candidate) => {
       const yesKey = heldPositionKey(candidate.conditionId, 0);

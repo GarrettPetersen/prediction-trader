@@ -11,7 +11,8 @@ import {
   buildWeatherPreviousRunForecastRecords,
   readJsonlRecords,
   summarizeWeatherDatasets,
-  type WeatherBacktestRunRecord
+  type WeatherBacktestRunRecord,
+  type WeatherResolutionActualRecord
 } from "../src/weatherDatasets.js";
 import type { WeatherMarketCandidate } from "../src/weatherMarkets.js";
 
@@ -64,6 +65,7 @@ describe("weather dataset stores", () => {
     const forecastSnapshotsPath = join(dir, "forecasts.jsonl");
     const previousRunForecastsPath = join(dir, "previous-runs.jsonl");
     const backtestRunsPath = join(dir, "runs.jsonl");
+    const resolutionActualsPath = join(dir, "resolution-actuals.jsonl");
     const market: WeatherMarketCandidate = {
       eventSlug: "highest-temperature-in-london-on-july-4-2026",
       eventTitle: "Highest temperature in London on July 4?",
@@ -169,6 +171,35 @@ describe("weather dataset stores", () => {
       signals: [],
       errors: []
     };
+    const resolutionActual: WeatherResolutionActualRecord = {
+      id: "weather_resolution_actual:test",
+      source: "weather_resolution_actual",
+      fetchedAt: "2026-07-05T00:00:00.000Z",
+      marketSnapshotCapturedAt: "2026-07-03T12:00:00.000Z",
+      eventSlug: "highest-temperature-in-london-on-july-4-2026",
+      eventTitle: "Highest temperature in London on July 4?",
+      city: "London",
+      date: "2026-07-04",
+      measure: "temperature_high",
+      resolutionStationId: "EGLL",
+      timezone: "Europe/London",
+      extremeC: {
+        wunderground: 22,
+        metar: 21.8,
+        deltaMetarMinusWunderground: -0.2
+      },
+      outcomes: [{
+        marketSlug: "london-20c",
+        question: "Will the highest temperature in London be 20°C?",
+        outcomeLabel: "20C",
+        lowerTempC: 19.5,
+        upperTempC: 20.5,
+        wundergroundYes: false,
+        metarYes: false
+      }],
+      warnings: [],
+      errors: []
+    };
 
     await appendJsonlRecordsUnique(observationsPath, [{
       id: "noaa_ncei:GHCND:TEST:2026-07-04",
@@ -185,13 +216,15 @@ describe("weather dataset stores", () => {
     await appendJsonlRecordsUnique(forecastSnapshotsPath, forecasts);
     await appendJsonlRecordsUnique(previousRunForecastsPath, previousRuns);
     await appendJsonlRecordsUnique(backtestRunsPath, [run]);
+    await appendJsonlRecordsUnique(resolutionActualsPath, [resolutionActual]);
 
     const summary = await summarizeWeatherDatasets({
       observationsPath,
       marketSnapshotsPath,
       forecastSnapshotsPath,
       previousRunForecastsPath,
-      backtestRunsPath
+      backtestRunsPath,
+      resolutionActualsPath
     });
 
     assert.equal(snapshots[0].tokens[0].tokenId, "yes-token");
@@ -211,5 +244,8 @@ describe("weather dataset stores", () => {
     assert.deepEqual(summary.previousRunForecasts.leadDays, [1]);
     assert.equal(summary.backtestRuns.count, 1);
     assert.deepEqual(summary.backtestRuns.targetDates, ["2026-07-04"]);
+    assert.equal(summary.resolutionActuals.count, 1);
+    assert.equal(summary.resolutionActuals.distinctMarkets, 1);
+    assert.deepEqual(summary.resolutionActuals.targetDates, ["2026-07-04"]);
   });
 });

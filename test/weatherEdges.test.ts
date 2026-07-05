@@ -130,4 +130,60 @@ describe("weather edge reports", () => {
     assert.equal(rows[0].liquidity, 100);
     assert.equal(rows[1].bestSide, "YES");
   });
+
+  it("suppresses day-ahead signals when the local market day has started", () => {
+    const report: WeatherPricingReport = {
+      group: {
+        eventSlug: "highest-temperature-in-london-on-july-4-2026",
+        eventTitle: "Highest temperature in London on July 4?",
+        eventEndDate: "2026-07-04T12:00:00Z",
+        city: "London",
+        date: "2026-07-04",
+        measure: "temperature_high",
+        marketCount: 1
+      },
+      markets: [{ marketSlug: "london-20c", liquidity: 200, volume: 30 }],
+      location: {
+        name: "London",
+        latitude: 51.5,
+        longitude: -0.1,
+        timezone: "Europe/London"
+      },
+      sources: [],
+      tradingWindow: {
+        safeToTrade: false,
+        status: "local_day_started",
+        timezone: "Europe/London",
+        localDate: "2026-07-04",
+        localTime: "13:00",
+        minutesAfterLocalMidnight: 780,
+        graceMinutes: 120,
+        reason: "Target date has started locally."
+      },
+      outcomes: [{
+        marketSlug: "london-20c",
+        question: "Will the highest temperature in London be 20°C?",
+        outcomeLabel: "20C",
+        fairYes: 0.6,
+        fairNo: 0.4,
+        yesAsk: 0.55,
+        yesEdge: 0.05,
+        signal: "BUY_YES",
+        edge: 0.05,
+        confidence: "HIGH",
+        kellyFraction: 0.02,
+        suggestedSizeUsd: 5,
+        price: 0.55,
+        reason: "test"
+      }],
+      errors: []
+    };
+
+    const [row] = buildWeatherEdgeRows([report]);
+
+    assert.equal(row.signal, "SKIP");
+    assert.equal(row.kellyFraction, 0);
+    assert.equal(row.suggestedSizeUsd, undefined);
+    assert.match(row.reason, /weather:midday/);
+  });
 });

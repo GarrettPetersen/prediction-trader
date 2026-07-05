@@ -99,18 +99,20 @@ import {
 } from "./weatherResolutionAudit.js";
 import {
   collectWeatherBacktestRunDataset,
-  collectWeatherForecastSnapshotsDataset,
-  collectWeatherMarketSnapshotsDataset,
-  collectWeatherObservationsDataset,
-  collectWeatherPreviousRunForecastsDataset,
-  summarizeWeatherDatasets,
-  weatherDatasetPaths,
-  type OpenMeteoPreviousRunSourceId,
-  type WeatherForecastSnapshotRecord,
-  type WeatherMarketSnapshotRecord,
-  type WeatherObservationRecord,
-  type WeatherPreviousRunForecastRecord
-} from "./weatherDatasets.js";
+	  collectWeatherForecastSnapshotsDataset,
+	  collectWeatherMarketSnapshotsDataset,
+	  collectWeatherObservationsDataset,
+	  collectWeatherPreviousRunForecastsDataset,
+	  collectWeatherResolutionActualsDataset,
+	  summarizeWeatherDatasets,
+	  weatherDatasetPaths,
+	  type OpenMeteoPreviousRunSourceId,
+	  type WeatherForecastSnapshotRecord,
+	  type WeatherMarketSnapshotRecord,
+	  type WeatherObservationRecord,
+	  type WeatherPreviousRunForecastRecord,
+	  type WeatherResolutionActualRecord
+	} from "./weatherDatasets.js";
 import type {
   PolymarketOrderTicket,
   PolymarketRedeemTicket,
@@ -584,6 +586,53 @@ function compactWeatherPreviousRunForecastRecord(record: WeatherPreviousRunForec
   };
 }
 
+function compactWeatherResolutionActualRecord(record: WeatherResolutionActualRecord) {
+  return {
+    id: record.id,
+    fetchedAt: record.fetchedAt,
+    marketSnapshotCapturedAt: record.marketSnapshotCapturedAt,
+    eventSlug: record.eventSlug,
+    city: record.city,
+    date: record.date,
+    measure: record.measure,
+    stationId: record.resolutionStationId,
+    stationName: record.resolutionStationName,
+    timezone: record.timezone,
+    wunderground: record.wunderground
+      ? {
+        ok: record.wunderground.ok,
+        highF: formatFahrenheit(record.wunderground.maxTempC),
+        lowF: formatFahrenheit(record.wunderground.minTempC),
+        rawUnit: record.wunderground.rawUnit,
+        note: record.wunderground.note,
+        error: record.wunderground.error
+      }
+      : undefined,
+    metar: record.metar
+      ? {
+        observationCount: record.metar.observationCount,
+        latestObservedAt: record.metar.latestObservedAt,
+        latestTempF: formatFahrenheit(record.metar.latestTempC),
+        highSoFarF: formatFahrenheit(record.metar.highSoFarC),
+        lowSoFarF: formatFahrenheit(record.metar.lowSoFarC)
+      }
+      : undefined,
+    extremeF: {
+      wunderground: formatFahrenheit(record.extremeC?.wunderground),
+      metar: formatFahrenheit(record.extremeC?.metar),
+      deltaMetarMinusWunderground: formatFahrenheitDelta(record.extremeC?.deltaMetarMinusWunderground)
+    },
+    outcomes: record.outcomes.map((outcome) => ({
+      marketSlug: outcome.marketSlug,
+      outcomeLabel: outcome.outcomeLabel,
+      wundergroundYes: outcome.wundergroundYes,
+      metarYes: outcome.metarYes
+    })),
+    warnings: record.warnings,
+    errors: record.errors
+  };
+}
+
 function compactWeatherBacktestTrade(trade: WeatherBacktestTrade) {
   return {
     side: trade.side,
@@ -711,6 +760,10 @@ function compactMiddayWeatherOutcome(row: MiddayWeatherOutcomePricing) {
   };
 }
 
+function formatFahrenheitDelta(valueC: number | undefined): number | undefined {
+  return valueC === undefined ? undefined : round(valueC * 9 / 5, 2);
+}
+
 function compactMiddayWeatherGroup(report: MiddayWeatherGroupReport) {
   return {
     group: report.group,
@@ -747,6 +800,41 @@ function compactMiddayWeatherGroup(report: MiddayWeatherGroupReport) {
           valueF: formatFahrenheit(point.valueC),
           hourlyCount: point.hourlyCount
         }))
+      }
+      : undefined,
+    resolutionCheck: report.resolutionCheck
+      ? {
+        provider: report.resolutionCheck.provider,
+        stationId: report.resolutionCheck.stationId,
+        stationName: report.resolutionCheck.stationName,
+        forecastLocationDistanceKm: round(report.resolutionCheck.forecastLocationDistanceKm, 3),
+        observationStationId: report.resolutionCheck.observationStationId,
+        observationCount: report.resolutionCheck.observationCount,
+        exactActual: report.resolutionCheck.exactActual
+          ? {
+            ok: report.resolutionCheck.exactActual.ok,
+            url: report.resolutionCheck.exactActual.url,
+            highF: formatFahrenheit(report.resolutionCheck.exactActual.maxTempC),
+            lowF: formatFahrenheit(report.resolutionCheck.exactActual.minTempC),
+            rawUnit: report.resolutionCheck.exactActual.rawUnit,
+            note: report.resolutionCheck.exactActual.note,
+            error: report.resolutionCheck.exactActual.error
+          }
+          : undefined,
+        observedExtremeDeltaF: formatFahrenheitDelta(report.resolutionCheck.observedExtremeDeltaC),
+        forecastMeanDeltaF: formatFahrenheitDelta(report.resolutionCheck.forecastMeanDeltaC),
+        finalMeanDeltaF: formatFahrenheitDelta(report.resolutionCheck.finalMeanDeltaC),
+        sourceComparisons: report.resolutionCheck.sourceComparisons.map((comparison) => ({
+          source: comparison.source,
+          ok: comparison.ok,
+          skipped: comparison.skipped,
+          forecastLocationDistanceKm: round(comparison.forecastLocationDistanceKm, 3),
+          forecastExtremeF: formatFahrenheit(comparison.forecastExtremeC),
+          deltaToResolutionF: formatFahrenheitDelta(comparison.deltaToResolutionC),
+          note: comparison.note,
+          error: comparison.error
+        })),
+        warnings: report.resolutionCheck.warnings
       }
       : undefined,
     sourceSummary: report.sourceSummary,
@@ -953,7 +1041,7 @@ Commands:
   weather:signals [--limit N] [--max-pages N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N] [--allow-city-forecast]
   weather:edges [--date YYYY-MM-DD | --days-ahead N] [--top N | --all] [--signals-only] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--sizing independent-kelly|city-portfolio] [--max-group-fraction N] [--portfolio-step-usd N] [--no-climatology] [--concurrency N] [--allow-city-forecast] [--allow-started-day] [--high-grace-minutes N] [--low-grace-minutes N]
   weather:tomorrow [--top N | --all] [--signals-only] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--sizing independent-kelly|city-portfolio] [--max-group-fraction N] [--portfolio-step-usd N] [--no-climatology] [--concurrency N] [--allow-started-day]
-  weather:midday (--held-vistadex | --slug SLUG | --slugs SLUG[,SLUG...]) [--date YYYY-MM-DD] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko] [--metar-hours N] [--top N | --all] [--signals-only] [--reports] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N]
+  weather:midday (--held-vistadex | --slug SLUG | --slugs SLUG[,SLUG...]) [--date YYYY-MM-DD] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko] [--metar-hours N] [--top N | --all] [--signals-only] [--reports] [--resolution-actuals] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N]
   weather:backtest --city CITY [--country CODE] --date YYYY-MM-DD [--measure temperature_high|temperature_low] [--years N] [--threshold N]
   weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--sizing independent-kelly|city-portfolio] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--max-group-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N]
   weather:resolution-audit [--date YYYY-MM-DD | --days-ahead N] [--status active|closed] [--distance-ok-km N] [--distance-warn-km N] [--top N]
@@ -962,6 +1050,7 @@ Commands:
   weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--path PATH]
   weather:dataset:forecasts [--market-captured-at ISO] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko] [--max-cities N] [--path PATH]
   weather:dataset:previous-runs --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--cities CITY[,CITY...]] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--lead-days 1,2,3] [--max-cities N] [--path PATH]
+  weather:dataset:resolution-actuals [--market-captured-at ISO] [--date YYYY-MM-DD] [--metar-hours N] [--max-groups N] [--no-wunderground] [--path PATH]
   weather:dataset:run [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--no-climatology] [--path PATH]
   weather:dataset:summary
   football:ratings [--refresh] [--team TEAM] [--limit N]
@@ -1164,7 +1253,8 @@ async function run(): Promise<void> {
       maxPerTradeUsd: numberArg(args, "max-per-trade", false) ?? numberArg(args, "max-usd", false),
       kellyMultiplier: numberArg(args, "kelly-multiplier", false),
       maxKellyFraction: numberArg(args, "max-kelly-fraction", false),
-      minEdge: numberArg(args, "min-edge", false)
+      minEdge: numberArg(args, "min-edge", false),
+      fetchResolutionActuals: args["resolution-actuals"] === true
     });
     print(args.raw === true ? report : compactMiddayWeatherReport(report, args));
     return;
@@ -1453,6 +1543,36 @@ async function run(): Promise<void> {
         },
         records: result.write.records.slice(0, 10).map(compactWeatherPreviousRunForecastRecord),
         omittedRecords: Math.max(0, result.write.records.length - 10),
+        errors: result.errors
+      });
+    return;
+  }
+
+  if (command === "weather:dataset:resolution-actuals") {
+    const result = await collectWeatherResolutionActualsDataset(config, {
+      marketSnapshotCapturedAt: stringArg(args, "market-captured-at", false),
+      date: stringArg(args, "date", false),
+      metarHours: numberArg(args, "metar-hours", false),
+      maxGroups: numberArg(args, "max-groups", false),
+      includeWunderground: args["no-wunderground"] !== true,
+      path: stringArg(args, "path", false)
+    });
+    print(args.raw === true
+      ? result
+      : {
+        path: result.path,
+        fetchedAt: result.fetchedAt,
+        marketSnapshotCapturedAt: result.marketSnapshotCapturedAt,
+        scannedMarketRecords: result.scannedMarketRecords,
+        targetGroups: result.targetGroups,
+        write: {
+          attempted: result.write.attempted,
+          appended: result.write.appended,
+          skipped: result.write.skipped
+        },
+        records: result.write.records.slice(0, 10).map(compactWeatherResolutionActualRecord),
+        omittedRecords: Math.max(0, result.write.records.length - 10),
+        warnings: result.warnings,
         errors: result.errors
       });
     return;

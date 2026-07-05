@@ -43,6 +43,13 @@ function lowConsensus(observedExtremeC: number, forecastExtremeMeanC: number, si
   };
 }
 
+function completeDay(consensus: MiddayWeatherConsensus): MiddayWeatherConsensus {
+  return {
+    ...consensus,
+    remainingHourCount: 0
+  };
+}
+
 describe("weather midday conditional probabilities", () => {
   it("marks a high-temperature range impossible after the observed high crosses the upper edge", () => {
     const probability = partialDayProbabilityInRange(highConsensus(36, 35, 0.5), 34, 35);
@@ -75,6 +82,16 @@ describe("weather midday conditional probabilities", () => {
 
     assert.ok(probability > 0.77);
     assert.ok(probability < 0.78);
+  });
+
+  it("locks a complete high-temperature day from the observed high", () => {
+    assert.equal(partialDayProbabilityInRange(completeDay(highConsensus(34.5, 40, 0.4)), 34, 35), 1);
+    assert.equal(partialDayProbabilityInRange(completeDay(highConsensus(33.5, 40, 0.4)), 34, 35), 0);
+  });
+
+  it("locks a complete low-temperature day from the observed low", () => {
+    assert.equal(partialDayProbabilityInRange(completeDay(lowConsensus(15.5, 10, 0.4)), 15, 16), 1);
+    assert.equal(partialDayProbabilityInRange(completeDay(lowConsensus(16.5, 10, 0.4)), 15, 16), 0);
   });
 });
 

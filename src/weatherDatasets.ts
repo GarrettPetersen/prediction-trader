@@ -15,6 +15,16 @@ import {
   type WeatherSourceResult
 } from "./weatherEdge.js";
 import {
+  fetchAviationMetars,
+  summarizeStationObservations,
+  type MiddayStationObservation
+} from "./weatherMidday.js";
+import {
+  fetchWundergroundDailyActual,
+  type WeatherResolutionDailyActual
+} from "./weatherResolutionData.js";
+import { inferWeatherTimeZone } from "./weatherTradingWindow.js";
+import {
   computeWeatherEdgeReport,
   filterWeatherGroupsForDate,
   localIsoDateDaysFrom,
@@ -40,6 +50,7 @@ export interface WeatherDatasetPaths {
   forecastSnapshotsPath: string;
   previousRunForecastsPath: string;
   backtestRunsPath: string;
+  resolutionActualsPath: string;
 }
 
 export interface JsonlWriteResult<T> {
@@ -176,6 +187,51 @@ export interface WeatherBacktestRunRecord {
   errors: Array<{ eventSlug: string; city: string; date: string; error: string }>;
 }
 
+export interface WeatherResolutionOutcomeRecord {
+  marketSlug: string;
+  question: string;
+  outcomeLabel: string;
+  lowerTempC?: number;
+  upperTempC?: number;
+  wundergroundYes?: boolean;
+  metarYes?: boolean;
+}
+
+export interface WeatherResolutionActualRecord {
+  id: string;
+  source: "weather_resolution_actual";
+  fetchedAt: string;
+  marketSnapshotCapturedAt: string;
+  eventSlug: string;
+  eventTitle: string;
+  city: string;
+  date: string;
+  measure: WeatherMeasure;
+  resolutionSource?: string;
+  resolutionStationId?: string;
+  resolutionStationName?: string;
+  timezone?: string;
+  forecastLocation?: Pick<WeatherLocation, "name" | "latitude" | "longitude" | "timezone" | "countryCode" | "country" | "admin1">;
+  wunderground?: WeatherResolutionDailyActual;
+  metar?: {
+    stationId: string;
+    timezone: string;
+    observationCount: number;
+    latestObservedAt?: string;
+    latestTempC?: number;
+    highSoFarC?: number;
+    lowSoFarC?: number;
+  };
+  extremeC?: {
+    wunderground?: number;
+    metar?: number;
+    deltaMetarMinusWunderground?: number;
+  };
+  outcomes: WeatherResolutionOutcomeRecord[];
+  warnings: string[];
+  errors: string[];
+}
+
 export interface CollectWeatherObservationsOptions {
   city?: string;
   countryCode?: string;
@@ -223,6 +279,16 @@ export interface CollectWeatherPreviousRunForecastsOptions {
 export interface CollectWeatherBacktestRunOptions extends WeatherEdgeReportOptions {
   path?: string;
   runAt?: string;
+}
+
+export interface CollectWeatherResolutionActualsOptions {
+  marketSnapshotCapturedAt?: string;
+  date?: string;
+  path?: string;
+  metarHours?: number;
+  maxGroups?: number;
+  fetchedAt?: string;
+  includeWunderground?: boolean;
 }
 
 export interface WeatherDatasetSummary {
@@ -968,22 +1034,262 @@ export async function collectWeatherBacktestRunDataset(
   };
 }
 
+function compactWeatherLocation(location: WeatherLocation | undefined): WeatherResolutionActualRecord["forecastLocation"] {
+  if (!location) return undefined;
+  return {
+    name: location.name,
+    latitude: location.latitude,
+    longitude: location.longitude,
+    timezone: location.timezone,
+    countryCode: location.countryCode,
+    country: location.country,
+    admin1: location.admin1
+  };
+}
+
+function extremeForMeasure(
+  measure: WeatherMeasure,
+  values: { maxTempC?: number; minTempC?: number } | undefined
+): number | undefined {
+  if (!values) return undefined;
+  return measure === "temperature_high" ? values.maxTempC : values.minTempC;
+}
+
+function metarExtremeForMeasure(
+  measure: WeatherMeasure,
+  observation: MiddayStationObservation | undefined
+): number | undefined {
+  if (!observation) return undefined;
+  return measure === "temperature_high" ? observation.highSoFarC : observation.lowSoFarC;
+}
+
+function outcomeContainsExtreme(outcome: WeatherMarketCandidate["parsed"]["outcome"], extremeC: number | undefined): boolean | undefined {
+  if (extremeC === undefined) return undefined;
+  return (outcome.lowerTempC === undefined || extremeC >= outcome.lowerTempC) &&
+    (outcome.upperTempC === undefined || extremeC < outcome.upperTempC);
+}
+
+function resolutionOutcomeRecords(
+  group: WeatherMarketGroup,
+  wundergroundExtremeC: number | undefined,
+  metarExtremeC: number | undefined
+): WeatherResolutionOutcomeRecord[] {
+  return group.markets.map((market) => ({
+    marketSlug: market.marketSlug,
+    question: market.question,
+    outcomeLabel: market.parsed.outcome.label,
+    lowerTempC: market.parsed.outcome.lowerTempC,
+    upperTempC: market.parsed.outcome.upperTempC,
+    wundergroundYes: outcomeContainsExtreme(market.parsed.outcome, wundergroundExtremeC),
+    metarYes: outcomeContainsExtreme(market.parsed.outcome, metarExtremeC)
+  }));
+}
+
+function resolutionTimezone(
+  location: WeatherLocation,
+  station: { country?: string; state?: string; longitude?: number } | undefined
+): string | undefined {
+  return inferWeatherTimeZone({
+    timezone: location.timezone,
+    countryCode: location.countryCode ?? station?.country,
+    country: location.country ?? station?.country,
+    admin1: location.admin1,
+    state: station?.state,
+    longitude: station?.longitude ?? location.longitude
+  });
+}
+
+async function buildWeatherResolutionActualRecord(
+  config: AppConfig,
+  group: WeatherMarketGroup,
+  marketSnapshotCapturedAt: string,
+  options: Required<Pick<CollectWeatherResolutionActualsOptions, "fetchedAt" | "metarHours" | "includeWunderground">>
+): Promise<WeatherResolutionActualRecord> {
+  const warnings: string[] = [];
+  const errors: string[] = [];
+  let forecastTarget: Awaited<ReturnType<typeof resolvePricingForecastTarget>> | undefined;
+
+  try {
+    const countryCode = DEFAULT_WEATHER_MARKET_COUNTRY_CODES[group.city];
+    forecastTarget = await resolvePricingForecastTarget(config, group, { countryCode });
+    if (forecastTarget.strictError) errors.push(forecastTarget.strictError);
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : String(error));
+  }
+
+  const station = forecastTarget?.resolutionTarget.station;
+  const timezone = forecastTarget
+    ? resolutionTimezone(forecastTarget.location, station)
+    : undefined;
+  let observation: MiddayStationObservation | undefined;
+  if (station && timezone) {
+    try {
+      observation = summarizeStationObservations(
+        station.id,
+        timezone,
+        group.date,
+        await fetchAviationMetars(station.id, { hours: options.metarHours })
+      );
+      if (observation.observationCount === 0) {
+        warnings.push(`No METAR observations found for ${station.id} on ${group.date} in ${timezone}.`);
+      }
+    } catch (error) {
+      errors.push(`METAR ${station.id}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  } else if (station && !timezone) {
+    warnings.push(`Could not infer timezone for ${station.id}; skipped METAR station-day summary.`);
+  }
+
+  const unitHint = group.markets[0]?.parsed.outcome.unit;
+  let wunderground: WeatherResolutionDailyActual | undefined;
+  if (options.includeWunderground && forecastTarget?.resolutionTarget.resolution) {
+    wunderground = await fetchWundergroundDailyActual(
+      config,
+      forecastTarget.resolutionTarget.resolution,
+      group.date,
+      { unitHint, fetchedAt: options.fetchedAt }
+    );
+    if (!wunderground.ok) {
+      warnings.push(wunderground.error ?? wunderground.note ?? "Wunderground actual was unavailable.");
+    }
+  }
+
+  const wundergroundExtremeC = extremeForMeasure(group.measure, wunderground);
+  const metarExtremeC = metarExtremeForMeasure(group.measure, observation);
+  const delta = wundergroundExtremeC === undefined || metarExtremeC === undefined
+    ? undefined
+    : metarExtremeC - wundergroundExtremeC;
+  if (delta !== undefined && Math.abs(delta) > 0.6) {
+    warnings.push(`METAR ${group.measure} differs from Wunderground by ${(delta * 9 / 5).toFixed(1)}F.`);
+  }
+
+  return {
+    id: stableId("weather_resolution_actual", {
+      marketSnapshotCapturedAt,
+      eventSlug: group.eventSlug,
+      date: group.date,
+      measure: group.measure
+    }),
+    source: "weather_resolution_actual",
+    fetchedAt: options.fetchedAt,
+    marketSnapshotCapturedAt,
+    eventSlug: group.eventSlug,
+    eventTitle: group.eventTitle,
+    city: group.city,
+    date: group.date,
+    measure: group.measure,
+    resolutionSource: forecastTarget?.resolutionTarget.resolutionSource,
+    resolutionStationId: station?.id,
+    resolutionStationName: station?.site,
+    timezone,
+    forecastLocation: compactWeatherLocation(forecastTarget?.location),
+    wunderground,
+    metar: observation
+      ? {
+        stationId: observation.stationId,
+        timezone: observation.timezone,
+        observationCount: observation.observationCount,
+        latestObservedAt: observation.latestObservedAt,
+        latestTempC: observation.latestTempC,
+        highSoFarC: observation.highSoFarC,
+        lowSoFarC: observation.lowSoFarC
+      }
+      : undefined,
+    extremeC: {
+      wunderground: wundergroundExtremeC,
+      metar: metarExtremeC,
+      deltaMetarMinusWunderground: delta
+    },
+    outcomes: resolutionOutcomeRecords(group, wundergroundExtremeC, metarExtremeC),
+    warnings: [...new Set(warnings)],
+    errors
+  };
+}
+
+export async function collectWeatherResolutionActualsDataset(
+  config: AppConfig,
+  options: CollectWeatherResolutionActualsOptions = {}
+): Promise<{
+  path: string;
+  fetchedAt: string;
+  marketSnapshotCapturedAt: string;
+  scannedMarketRecords: number;
+  targetGroups: number;
+  write: JsonlWriteResult<WeatherResolutionActualRecord>;
+  warnings: string[];
+  errors: Array<{ eventSlug: string; city: string; date: string; error: string }>;
+}> {
+  const marketRecords = await readJsonlRecords<WeatherMarketSnapshotRecord>(config.weather.datasets.marketSnapshotsPath);
+  if (marketRecords.length === 0) {
+    throw new Error(`No market snapshot records found at ${config.weather.datasets.marketSnapshotsPath}. Run weather:dataset:markets first.`);
+  }
+
+  const marketSnapshotCapturedAt = options.marketSnapshotCapturedAt ?? maxString(
+    marketRecords.map((record) => record.capturedAt)
+  );
+  if (!marketSnapshotCapturedAt) throw new Error("Could not determine latest market snapshot timestamp.");
+
+  const selected = marketRecords.filter((record) =>
+    record.capturedAt === marketSnapshotCapturedAt &&
+    (options.date === undefined || record.date === options.date)
+  );
+  const groups = marketSnapshotGroups(selected).slice(0, options.maxGroups);
+  const fetchedAt = options.fetchedAt ?? new Date().toISOString();
+  const records: WeatherResolutionActualRecord[] = [];
+  const errors: Array<{ eventSlug: string; city: string; date: string; error: string }> = [];
+
+  for (const group of groups) {
+    try {
+      records.push(await buildWeatherResolutionActualRecord(config, group, marketSnapshotCapturedAt, {
+        fetchedAt,
+        metarHours: Math.max(24, Math.trunc(options.metarHours ?? 72)),
+        includeWunderground: options.includeWunderground ?? true
+      }));
+    } catch (error) {
+      errors.push({
+        eventSlug: group.eventSlug,
+        city: group.city,
+        date: group.date,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  const write = await appendJsonlRecordsUnique(
+    options.path ?? config.weather.datasets.resolutionActualsPath,
+    records
+  );
+
+  return {
+    path: write.path,
+    fetchedAt,
+    marketSnapshotCapturedAt,
+    scannedMarketRecords: selected.length,
+    targetGroups: groups.length,
+    write,
+    warnings: uniqueSorted(records.flatMap((record) => record.warnings)),
+    errors
+  };
+}
+
 export async function summarizeWeatherDatasets(paths: WeatherDatasetPaths): Promise<{
   observations: WeatherDatasetSummary;
   marketSnapshots: WeatherDatasetSummary;
   forecastSnapshots: WeatherDatasetSummary;
   previousRunForecasts: WeatherDatasetSummary;
   backtestRuns: WeatherDatasetSummary;
+  resolutionActuals: WeatherDatasetSummary;
 }> {
-  const [observations, marketSnapshots, forecastSnapshots, previousRunForecasts, backtestRuns] = await Promise.all([
+  const [observations, marketSnapshots, forecastSnapshots, previousRunForecasts, backtestRuns, resolutionActuals] = await Promise.all([
     summarizeObservationDataset(paths.observationsPath),
     summarizeMarketSnapshotDataset(paths.marketSnapshotsPath),
     summarizeForecastSnapshotDataset(paths.forecastSnapshotsPath),
     summarizePreviousRunForecastDataset(paths.previousRunForecastsPath),
-    summarizeBacktestRunDataset(paths.backtestRunsPath)
+    summarizeBacktestRunDataset(paths.backtestRunsPath),
+    summarizeResolutionActualsDataset(paths.resolutionActualsPath)
   ]);
 
-  return { observations, marketSnapshots, forecastSnapshots, previousRunForecasts, backtestRuns };
+  return { observations, marketSnapshots, forecastSnapshots, previousRunForecasts, backtestRuns, resolutionActuals };
 }
 
 async function summarizeObservationDataset(path: string): Promise<WeatherDatasetSummary> {
@@ -1080,6 +1386,23 @@ async function summarizeBacktestRunDataset(path: string): Promise<WeatherDataset
     firstRunAt: minString(runTimes),
     lastRunAt: maxString(runTimes),
     targetDates
+  };
+}
+
+async function summarizeResolutionActualsDataset(path: string): Promise<WeatherDatasetSummary> {
+  const records = await readJsonlRecords<Partial<WeatherResolutionActualRecord>>(path);
+  const fetchedAt = records.flatMap((record) => typeof record.fetchedAt === "string" ? [record.fetchedAt] : []);
+  const dates = uniqueSorted(records.flatMap((record) => typeof record.date === "string" ? [record.date] : []));
+  const markets = new Set(records.flatMap((record) => typeof record.eventSlug === "string" ? [record.eventSlug] : []));
+  return {
+    path,
+    count: records.length,
+    firstDate: minString(dates),
+    lastDate: maxString(dates),
+    firstCapturedAt: minString(fetchedAt),
+    lastCapturedAt: maxString(fetchedAt),
+    distinctMarkets: markets.size,
+    targetDates: dates
   };
 }
 

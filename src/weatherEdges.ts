@@ -127,6 +127,7 @@ export function buildWeatherEdgeRows(reports: WeatherPricingReport[]): WeatherEd
       return report.outcomes.map((outcome) => {
         const side = bestSide(outcome);
         const market = markets.get(outcome.marketSlug);
+        const unsafeStartedDay = report.tradingWindow?.safeToTrade === false;
         return {
           eventSlug: report.group.eventSlug,
           eventTitle: report.group.eventTitle,
@@ -138,7 +139,7 @@ export function buildWeatherEdgeRows(reports: WeatherPricingReport[]): WeatherEd
           question: outcome.question,
           outcomeLabel: outcome.outcomeLabel,
           bestSide: side,
-          signal: outcome.signal,
+          signal: unsafeStartedDay ? "SKIP" as const : outcome.signal,
           fairYes: outcome.fairYes,
           fairNo: outcome.fairNo,
           yesBid: outcome.yesBid,
@@ -149,10 +150,10 @@ export function buildWeatherEdgeRows(reports: WeatherPricingReport[]): WeatherEd
           noEdge: outcome.noEdge,
           bestEdge: side === "YES" ? outcome.yesEdge : outcome.noEdge,
           confidence: outcome.confidence,
-          kellyFraction: outcome.kellyFraction,
-          suggestedSizeUsd: outcome.suggestedSizeUsd,
+          kellyFraction: unsafeStartedDay ? 0 : outcome.kellyFraction,
+          suggestedSizeUsd: unsafeStartedDay ? undefined : outcome.suggestedSizeUsd,
           tokenId: outcome.tokenId,
-          price: outcome.price,
+          price: unsafeStartedDay ? undefined : outcome.price,
           liquidity: market?.liquidity,
           volume: market?.volume,
           resolutionSource: report.resolutionTarget?.resolutionSource,
@@ -165,7 +166,9 @@ export function buildWeatherEdgeRows(reports: WeatherPricingReport[]): WeatherEd
           modelStdDevC: report.consensus?.modelStdDevC,
           agreement: report.consensus?.agreement,
           tradingWindow: report.tradingWindow,
-          reason: outcome.reason
+          reason: unsafeStartedDay
+            ? `${report.tradingWindow?.reason ?? "Market-local day has already started."} Use weather:midday for observation-aware same-day pricing.`
+            : outcome.reason
         };
       });
     })

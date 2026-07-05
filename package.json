@@ -38,6 +38,7 @@
     "weather:dataset:markets": "node --import tsx src/cli.ts weather:dataset:markets",
     "weather:dataset:forecasts": "node --import tsx src/cli.ts weather:dataset:forecasts",
     "weather:dataset:previous-runs": "node --import tsx src/cli.ts weather:dataset:previous-runs",
+    "weather:dataset:resolution-actuals": "node --import tsx src/cli.ts weather:dataset:resolution-actuals",
     "weather:dataset:run": "node --import tsx src/cli.ts weather:dataset:run",
     "weather:dataset:summary": "node --import tsx src/cli.ts weather:dataset:summary",
     "football:ratings": "node --import tsx src/cli.ts football:ratings",
