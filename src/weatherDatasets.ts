@@ -37,6 +37,12 @@ import {
   type WeatherPricingResolutionTarget
 } from "./weatherPricing.js";
 import {
+  weatherCityTargetKey,
+  weatherLocationTargetKey,
+  weatherStationTargetKey,
+  type WeatherForecastTargetKind
+} from "./weatherStations.js";
+import {
   fetchPolymarketWeatherMarkets,
   type WeatherMarketCandidate,
   type WeatherMarketGroup,
@@ -154,6 +160,12 @@ export interface WeatherPreviousRunForecastRecord {
   provider: string;
   model: string;
   collectedAt: string;
+  targetKey?: string;
+  targetKind?: WeatherForecastTargetKind;
+  resolutionSource?: string;
+  resolutionStationId?: string;
+  resolutionStationName?: string;
+  cityDistanceKm?: number;
   city: string;
   countryCode?: string;
   date: string;
@@ -324,6 +336,15 @@ const OPEN_METEO_PREVIOUS_RUN_MODELS: Record<
     model: "ukmo_seamless"
   }
 };
+
+interface PreviousRunForecastTarget {
+  city: string;
+  countryCode?: string;
+  location: WeatherLocation;
+  targetKey: string;
+  targetKind: WeatherForecastTargetKind;
+  resolutionTarget?: WeatherPricingResolutionTarget;
+}
 
 export const DEFAULT_WEATHER_MARKET_COUNTRY_CODES: Record<string, string> = {
   Amsterdam: "NL",
@@ -583,6 +604,21 @@ function compactForecastResolutionTarget(
   };
 }
 
+function previousRunTargetKey(
+  city: string,
+  location: WeatherLocation,
+  target: WeatherPricingResolutionTarget | undefined
+): string {
+  return weatherStationTargetKey(target?.station?.id) ??
+    (target?.matched ? weatherLocationTargetKey(location) : weatherCityTargetKey(city));
+}
+
+function previousRunTargetKind(target: WeatherPricingResolutionTarget | undefined): WeatherForecastTargetKind {
+  if (target?.station?.id) return "resolution_station";
+  if (target?.matched) return "location";
+  return "city";
+}
+
 function forecastTargetKey(
   location: WeatherLocation | undefined,
   target: WeatherPricingResolutionTarget | undefined
@@ -657,6 +693,9 @@ export function buildWeatherPreviousRunForecastRecords(options: {
   city: string;
   countryCode?: string;
   location: WeatherLocation;
+  targetKey?: string;
+  targetKind?: WeatherForecastTargetKind;
+  resolutionTarget?: WeatherPricingResolutionTarget;
   source: OpenMeteoPreviousRunSourceId;
   provider: string;
   model: string;
@@ -668,6 +707,8 @@ export function buildWeatherPreviousRunForecastRecords(options: {
 }): WeatherPreviousRunForecastRecord[] {
   const times = stringArray(options.hourly.time);
   const records: WeatherPreviousRunForecastRecord[] = [];
+  const targetKey = options.targetKey ?? previousRunTargetKey(options.city, options.location, options.resolutionTarget);
+  const targetKind = options.targetKind ?? previousRunTargetKind(options.resolutionTarget);
 
   for (const leadDays of options.leadDays) {
     const values = numberArray(options.hourly[`temperature_2m_previous_day${leadDays}`]);
@@ -694,6 +735,7 @@ export function buildWeatherPreviousRunForecastRecords(options: {
         records.push({
           id: [
             "weather_previous_run",
+            targetKey,
             options.city,
             date,
             measure,
@@ -704,6 +746,12 @@ export function buildWeatherPreviousRunForecastRecords(options: {
           provider: options.provider,
           model: options.model,
           collectedAt: options.collectedAt,
+          targetKey,
+          targetKind,
+          resolutionSource: options.resolutionTarget?.resolutionSource,
+          resolutionStationId: options.resolutionTarget?.station?.id,
+          resolutionStationName: options.resolutionTarget?.station?.site,
+          cityDistanceKm: options.resolutionTarget?.cityDistanceKm,
           city: options.city,
           countryCode: options.countryCode,
           date,
@@ -824,36 +872,25 @@ export async function collectWeatherPreviousRunForecastsDataset(
   startDate: string;
   endDate: string;
   cityCount: number;
+  targetCount: number;
   sourceIds: OpenMeteoPreviousRunSourceId[];
   leadDays: number[];
   write: JsonlWriteResult<WeatherPreviousRunForecastRecord>;
   errors: Array<{ city: string; source?: string; error: string }>;
 }> {
   if (options.startDate > options.endDate) throw new Error("--start-date must be before or equal to --end-date.");
-  const cities = (options.cities && options.cities.length > 0
-    ? options.cities
-    : await latestMarketSnapshotCities(config)
-  ).slice(0, options.maxCities);
   const sourceIds = options.sources ?? ["openmeteo_gfs", "openmeteo_ecmwf", "openmeteo_ukmo"];
   const leadDays = (options.leadDays ?? [1]).map((value) => Math.max(1, Math.min(7, Math.trunc(value))));
   const collectedAt = options.collectedAt ?? new Date().toISOString();
   const records: WeatherPreviousRunForecastRecord[] = [];
   const errors: Array<{ city: string; source?: string; error: string }> = [];
+  const targets = (await previousRunForecastTargets(config, options, errors)).slice(0, options.maxCities);
 
-  for (const city of cities) {
-    const countryCode = options.countryCodes?.[city] ?? DEFAULT_WEATHER_MARKET_COUNTRY_CODES[city];
-    let location: WeatherLocation;
-    try {
-      location = await resolveWeatherLocation(config, { city, countryCode });
-    } catch (error) {
-      errors.push({ city, error: error instanceof Error ? error.message : String(error) });
-      continue;
-    }
-
+  for (const target of targets) {
     for (const source of sourceIds) {
       const model = OPEN_METEO_PREVIOUS_RUN_MODELS[source];
       try {
-        const raw = await fetchOpenMeteoPreviousRuns(config, location, {
+        const raw = await fetchOpenMeteoPreviousRuns(config, target.location, {
           startDate: options.startDate,
           endDate: options.endDate,
           model: model.model,
@@ -861,9 +898,12 @@ export async function collectWeatherPreviousRunForecastsDataset(
         });
         records.push(...buildWeatherPreviousRunForecastRecords({
           collectedAt,
-          city,
-          countryCode,
-          location,
+          city: target.city,
+          countryCode: target.countryCode,
+          location: target.location,
+          targetKey: target.targetKey,
+          targetKind: target.targetKind,
+          resolutionTarget: target.resolutionTarget,
           source,
           provider: model.provider,
           model: model.model,
@@ -874,7 +914,7 @@ export async function collectWeatherPreviousRunForecastsDataset(
         }));
       } catch (error) {
         errors.push({
-          city,
+          city: target.city,
           source,
           error: error instanceof Error ? error.message : String(error)
         });
@@ -892,7 +932,8 @@ export async function collectWeatherPreviousRunForecastsDataset(
     collectedAt,
     startDate: options.startDate,
     endDate: options.endDate,
-    cityCount: cities.length,
+    cityCount: new Set(targets.map((target) => target.city)).size,
+    targetCount: targets.length,
     sourceIds,
     leadDays,
     write,
@@ -1361,7 +1402,7 @@ async function summarizePreviousRunForecastDataset(path: string): Promise<Weathe
     ) {
       return [];
     }
-    return [`${record.city}|${record.date}|${record.measure}|${record.source}|${record.leadDays}`];
+    return [`${record.targetKey ?? weatherCityTargetKey(record.city)}|${record.date}|${record.measure}|${record.source}|${record.leadDays}`];
   }));
   return {
     path,
@@ -1478,11 +1519,62 @@ function addDaysIso(value: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-async function latestMarketSnapshotCities(config: AppConfig): Promise<string[]> {
+async function latestMarketSnapshotGroups(config: AppConfig): Promise<WeatherMarketGroup[]> {
   const records = await readJsonlRecords<WeatherMarketSnapshotRecord>(config.weather.datasets.marketSnapshotsPath);
   const latest = maxString(records.map((record) => record.capturedAt));
   if (!latest) throw new Error(`No market snapshots found at ${config.weather.datasets.marketSnapshotsPath}.`);
-  return uniqueSorted(records.filter((record) => record.capturedAt === latest).map((record) => record.city));
+  return marketSnapshotGroups(records.filter((record) => record.capturedAt === latest));
+}
+
+async function previousRunForecastTargets(
+  config: AppConfig,
+  options: CollectWeatherPreviousRunForecastsOptions,
+  errors: Array<{ city: string; source?: string; error: string }>
+): Promise<PreviousRunForecastTarget[]> {
+  if (options.cities && options.cities.length > 0) {
+    const targets: PreviousRunForecastTarget[] = [];
+    for (const city of options.cities) {
+      const countryCode = options.countryCodes?.[city] ?? DEFAULT_WEATHER_MARKET_COUNTRY_CODES[city];
+      try {
+        const location = await resolveWeatherLocation(config, { city, countryCode });
+        targets.push({
+          city,
+          countryCode,
+          location,
+          targetKey: weatherCityTargetKey(city),
+          targetKind: "city"
+        });
+      } catch (error) {
+        errors.push({ city, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return targets;
+  }
+
+  const targets = new Map<string, PreviousRunForecastTarget>();
+  for (const group of await latestMarketSnapshotGroups(config)) {
+    const countryCode = options.countryCodes?.[group.city] ?? DEFAULT_WEATHER_MARKET_COUNTRY_CODES[group.city];
+    try {
+      const forecastTarget = await resolvePricingForecastTarget(config, group, { countryCode });
+      if (forecastTarget.strictError) {
+        errors.push({ city: group.city, error: forecastTarget.strictError });
+        continue;
+      }
+      const targetKey = previousRunTargetKey(group.city, forecastTarget.location, forecastTarget.resolutionTarget);
+      if (targets.has(targetKey)) continue;
+      targets.set(targetKey, {
+        city: group.city,
+        countryCode,
+        location: forecastTarget.location,
+        targetKey,
+        targetKind: previousRunTargetKind(forecastTarget.resolutionTarget),
+        resolutionTarget: forecastTarget.resolutionTarget
+      });
+    } catch (error) {
+      errors.push({ city: group.city, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return [...targets.values()].sort((a, b) => a.targetKey.localeCompare(b.targetKey));
 }
 
 async function fetchOpenMeteoPreviousRuns(

@@ -99,20 +99,20 @@ import {
 } from "./weatherResolutionAudit.js";
 import {
   collectWeatherBacktestRunDataset,
-	  collectWeatherForecastSnapshotsDataset,
-	  collectWeatherMarketSnapshotsDataset,
-	  collectWeatherObservationsDataset,
-	  collectWeatherPreviousRunForecastsDataset,
-	  collectWeatherResolutionActualsDataset,
-	  summarizeWeatherDatasets,
-	  weatherDatasetPaths,
-	  type OpenMeteoPreviousRunSourceId,
-	  type WeatherForecastSnapshotRecord,
-	  type WeatherMarketSnapshotRecord,
-	  type WeatherObservationRecord,
-	  type WeatherPreviousRunForecastRecord,
-	  type WeatherResolutionActualRecord
-	} from "./weatherDatasets.js";
+  collectWeatherForecastSnapshotsDataset,
+  collectWeatherMarketSnapshotsDataset,
+  collectWeatherObservationsDataset,
+  collectWeatherPreviousRunForecastsDataset,
+  collectWeatherResolutionActualsDataset,
+  summarizeWeatherDatasets,
+  weatherDatasetPaths,
+  type OpenMeteoPreviousRunSourceId,
+  type WeatherForecastSnapshotRecord,
+  type WeatherMarketSnapshotRecord,
+  type WeatherObservationRecord,
+  type WeatherPreviousRunForecastRecord,
+  type WeatherResolutionActualRecord
+} from "./weatherDatasets.js";
 import type {
   PolymarketOrderTicket,
   PolymarketRedeemTicket,
@@ -570,6 +570,11 @@ function compactWeatherPreviousRunForecastRecord(record: WeatherPreviousRunForec
   return {
     id: record.id,
     collectedAt: record.collectedAt,
+    targetKey: record.targetKey,
+    targetKind: record.targetKind,
+    resolutionStationId: record.resolutionStationId,
+    resolutionStationName: record.resolutionStationName,
+    cityDistanceKm: round(record.cityDistanceKm, 1),
     city: record.city,
     countryCode: record.countryCode,
     date: record.date,
@@ -647,6 +652,8 @@ function compactWeatherBacktestTrade(trade: WeatherBacktestTrade) {
     kellyFraction: round(trade.kellyFraction),
     rawStakeUsd: round(trade.rawStakeUsd, 2),
     city: trade.city,
+    forecastTargetKey: trade.forecastTargetKey,
+    resolutionStationId: trade.resolutionStationId,
     measure: trade.measure,
     outcomeLabel: trade.outcomeLabel,
     actualC: round(trade.actualC, 2),
@@ -1534,6 +1541,7 @@ async function run(): Promise<void> {
         startDate: result.startDate,
         endDate: result.endDate,
         cityCount: result.cityCount,
+        targetCount: result.targetCount,
         sourceIds: result.sourceIds,
         leadDays: result.leadDays,
         write: {

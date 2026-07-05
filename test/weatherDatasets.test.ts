@@ -231,6 +231,8 @@ describe("weather dataset stores", () => {
     assert.equal(forecasts[0].valueC, 22);
     assert.equal(forecasts[1].skipped, true);
     assert.equal(previousRuns.length, 2);
+    assert.equal(previousRuns[0].targetKey, "city:london");
+    assert.equal(previousRuns[0].targetKind, "city");
     assert.equal(previousRuns.find((record) => record.measure === "temperature_high")?.valueC, 22);
     assert.equal(previousRuns.find((record) => record.measure === "temperature_low")?.valueC, 15);
     assert.equal(summary.observations.count, 1);

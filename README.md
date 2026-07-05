@@ -548,11 +548,17 @@ npm run weather:dataset:previous-runs -- \
 ```
 
 This uses Open-Meteo's Previous Model Runs API, not the normal historical
-weather API. The current command is still city-list based, so treat it as a
-forecast-calibration dataset until it is extended to resolve the same
-station/feed targets used by live pricing. For each location/date/source/lead
-time it stores the forecast value that the model predicted before valid time,
-such as `leadDays=1` for the value predicted roughly 24 hours earlier.
+weather API. By default, the command reads the latest saved market snapshot,
+resolves each market group to the same settlement station/feed used by live
+pricing, and stores rows keyed by a stable forecast target such as
+`station:KATL` or `station:EHAM`. Each row also records the display city,
+station id/name, and city-to-station distance so backtests can prove they are
+calibrating against the same target they would trade. Passing `--cities`
+explicitly is still supported for research, but those rows are keyed as
+`city:...` and should not be mixed with production station-target backtests.
+For each target/date/source/lead time it stores the forecast value that the
+model predicted before valid time, such as `leadDays=1` for the value predicted
+roughly 24 hours earlier.
 
 Run a resolved-market strategy backtest for a specific date:
 
@@ -572,11 +578,12 @@ npm run weather:backtest:markets -- \
   --city-bias-prior-weight 30
 ```
 
-That command fetches resolved Polymarket weather binaries for the date, joins
-their historical price just before the decision time to local Open-Meteo
-previous-run forecasts, settles PnL from Polymarket's final resolved outcome,
-sizes every side whose calibrated probability edge exceeds `--min-edge` with
-fractional Kelly. For a binary contract priced `c` with fair probability `p`,
+That command fetches resolved Polymarket weather binaries for the date, resolves
+each market to its settlement forecast target, joins historical price just
+before the decision time to matching station-keyed Open-Meteo previous-run
+forecasts, settles PnL from Polymarket's final resolved outcome, and sizes every
+side whose calibrated probability edge exceeds `--min-edge` with fractional
+Kelly. For a binary contract priced `c` with fair probability `p`,
 full Kelly stakes `(p - c) / (1 - c)` of bankroll; the default quarter-Kelly
 multiplier makes that conservative, `--max-kelly-fraction` caps each trade,
 `--max-per-trade` caps absolute dollars, and `--max-portfolio-fraction` scales
@@ -587,10 +594,11 @@ distribution before the daily portfolio cap is applied. `--max-group-fraction`
 limits exposure to one correlated station-day, and `--portfolio-step-usd`
 controls the optimizer's dollar granularity. Keep
 `--sizing independent-kelly` available as the baseline when comparing changes.
-NOAA actuals still calibrate forecast errors and are shown as diagnostics when
-available, but they are not used as a proxy for market settlement. It is useful
-for research, but still assumes fills at historical YES prices, infers NO prices
-as `1 - YES`, and does not yet model order-book depth, spread, fees, or
+Settlement-source actuals from `weather:dataset:resolution-actuals` are used for
+station-keyed calibration when available; NOAA actuals remain useful diagnostics
+for older city-keyed research rows, but they are not used as a proxy for market
+settlement. The backtest still assumes fills at historical YES prices, infers NO
+prices as `1 - YES`, and does not yet model order-book depth, spread, fees, or
 liquidity caps. Use `--min-trade-price` to exclude very cheap contracts while we
 are still using last-trade/price-history fills instead of full order-book
 simulation.
@@ -626,9 +634,10 @@ the forecast target is HKO. The pricing output includes `resolution.matched`,
 `stationId`, and `cityDistanceKm` for every signal. Markets without a usable
 station/feed resolution source are not priced unless you explicitly pass
 `--allow-city-forecast`.
-Historical previous-run backtests should be refreshed with station-coordinate
-datasets before being treated as production evidence; old rows collected by
-city name are useful only for rough model development.
+Historical previous-run backtests should be refreshed after market snapshots are
+saved so rows are keyed to `station:...` targets. Old rows collected by city name
+are useful only for rough model development, and station-settled markets will no
+longer be satisfied by those city rows.
 
 Save a WeatherEdge pricing run for later audit:
 
@@ -669,10 +678,12 @@ Current WeatherEdge limits:
   `weather:edges --allow-started-day` is used for inspection, rows from
   already-started market-local days are downgraded to `SKIP`; use
   `weather:midday` for actual intraday signal generation.
-- Market backtests now use Open-Meteo previous-run forecasts plus NOAA actuals,
-  but international city settlement coverage is still incomplete and execution
-  modeling is intentionally conservative research scaffolding, not a fill
-  simulator.
+- Market backtests now use station-target Open-Meteo previous-run forecasts
+  where resolution stations are exposed, plus settlement-source actuals when
+  collected. International markets without exposed resolution stations, such as
+  some Hong Kong snapshots, still need explicit feed mapping before they can be
+  treated as production-grade evidence. Execution modeling is intentionally
+  conservative research scaffolding, not a fill simulator.
 
 ## Football Edge Model
 

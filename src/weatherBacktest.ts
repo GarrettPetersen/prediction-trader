@@ -1,8 +1,18 @@
 import type { AppConfig } from "./config.js";
 import { parseGammaList } from "./marketplaces/polymarketData.js";
-import { type WeatherObservationRecord, type WeatherPreviousRunForecastRecord, readJsonlRecords } from "./weatherDatasets.js";
+import {
+  type WeatherObservationRecord,
+  type WeatherPreviousRunForecastRecord,
+  type WeatherResolutionActualRecord,
+  readJsonlRecords
+} from "./weatherDatasets.js";
 import { parseWeatherMarketQuestion, type ParsedWeatherMarket, type WeatherMeasure } from "./weatherMarkets.js";
 import { probabilityInRange } from "./weatherPricing.js";
+import {
+  parseResolutionSource,
+  weatherCityTargetKey,
+  weatherStationTargetKey
+} from "./weatherStations.js";
 import {
   DEFAULT_KELLY_MULTIPLIER,
   DEFAULT_MAX_KELLY_FRACTION,
@@ -57,6 +67,8 @@ export interface WeatherBacktestTrade {
   marketSlug: string;
   question: string;
   city: string;
+  forecastTargetKey: string;
+  resolutionStationId?: string;
   date: string;
   measure: WeatherMeasure;
   outcomeLabel: string;
@@ -213,23 +225,36 @@ function numberValue(value: unknown): number | undefined {
   return Number.isFinite(number) ? number : undefined;
 }
 
-function normalizeCityKey(value: string | undefined): string {
-  const normalized = (value ?? "")
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-  if (normalized === "new york city") return "new york";
-  return normalized;
+function observationKey(targetKey: string, date: string): string {
+  return `${targetKey}|${date}`;
 }
 
-function observationKey(city: string | undefined, date: string): string {
-  return `${normalizeCityKey(city)}|${date}`;
+function forecastKey(targetKey: string, date: string, measure: WeatherMeasure): string {
+  return `${targetKey}|${date}|${measure}`;
 }
 
-function forecastKey(city: string, date: string, measure: WeatherMeasure): string {
-  return `${normalizeCityKey(city)}|${date}|${measure}`;
+function targetKeyForPreviousRun(record: WeatherPreviousRunForecastRecord): string {
+  return record.targetKey ?? weatherCityTargetKey(record.city);
+}
+
+function looksLikeHkoText(value: string | undefined): boolean {
+  return /hong\s*kong\s+observatory|\bhko\b|weather\.gov\.hk/i.test(value ?? "");
+}
+
+function targetForClosedMarket(market: ClosedWeatherMarket): { targetKey: string; stationId?: string } {
+  const resolution = parseResolutionSource(market.resolutionSource);
+  const stationId = resolution.stationId ?? (
+    looksLikeHkoText(market.resolutionSource) ||
+      looksLikeHkoText(market.question) ||
+      looksLikeHkoText(market.eventTitle)
+      ? "HKO"
+      : undefined
+  );
+  const stationTarget = weatherStationTargetKey(stationId);
+  return {
+    targetKey: stationTarget ?? weatherCityTargetKey(market.parsed.city),
+    stationId
+  };
 }
 
 function mean(values: number[]): number {
@@ -399,15 +424,42 @@ async function fetchTokenPriceHistory(tokenId: string): Promise<PricePoint[]> {
   }).sort((a, b) => a.t - b.t);
 }
 
-function buildActualIndex(records: WeatherObservationRecord[]): Map<string, ActualIndexValue> {
+function setActualIndexValue(
+  index: Map<string, ActualIndexValue>,
+  targetKey: string,
+  date: string,
+  measure: WeatherMeasure,
+  valueC: number | undefined
+): void {
+  if (valueC === undefined) return;
+  const key = observationKey(targetKey, date);
+  const existing = index.get(key) ?? {};
+  index.set(key, {
+    maxTempC: measure === "temperature_high" ? valueC : existing.maxTempC,
+    minTempC: measure === "temperature_low" ? valueC : existing.minTempC
+  });
+}
+
+function buildActualIndex(
+  records: WeatherObservationRecord[],
+  resolutionActuals: WeatherResolutionActualRecord[]
+): Map<string, ActualIndexValue> {
   const index = new Map<string, ActualIndexValue>();
   for (const record of records) {
-    const key = observationKey(record.city, record.date);
+    const key = observationKey(weatherCityTargetKey(record.city), record.date);
     const existing = index.get(key) ?? {};
     index.set(key, {
       maxTempC: record.maxTempC ?? existing.maxTempC,
       minTempC: record.minTempC ?? existing.minTempC
     });
+  }
+  for (const record of resolutionActuals) {
+    const valueC = record.extremeC?.wunderground ?? record.extremeC?.metar;
+    const stationTarget = weatherStationTargetKey(record.resolutionStationId);
+    if (stationTarget) {
+      setActualIndexValue(index, stationTarget, record.date, record.measure, valueC);
+    }
+    setActualIndexValue(index, weatherCityTargetKey(record.city), record.date, record.measure, valueC);
   }
   return index;
 }
@@ -421,7 +473,7 @@ function buildForecastValueIndex(
   for (const record of records) {
     if (!record.ok || record.valueC === undefined || record.leadDays !== options.leadDays) continue;
     if (!sourceSet.has(record.source)) continue;
-    const key = forecastKey(record.city, record.date, record.measure);
+    const key = forecastKey(targetKeyForPreviousRun(record), record.date, record.measure);
     const values = byKey.get(key) ?? new Map<string, SourceForecastValue>();
     values.set(record.source, { source: record.source, valueC: record.valueC });
     byKey.set(key, values);
@@ -583,8 +635,8 @@ function buildForecastIndex(
   }));
 }
 
-function calibrationBiasForCity(calibration: Calibration, city: string): number {
-  return calibration.cityBiases.get(normalizeCityKey(city))?.biasC ?? calibration.biasC;
+function calibrationBiasForTarget(calibration: Calibration, targetKey: string): number {
+  return calibration.cityBiases.get(targetKey)?.biasC ?? calibration.biasC;
 }
 
 function brierScore(items: Array<{ probability: number; actual: boolean }>): number | undefined {
@@ -640,15 +692,16 @@ export async function runWeatherMarketBacktest(
   );
   const cityBiasPriorWeight = Math.max(0, options.cityBiasPriorWeight ?? DEFAULT_CITY_BIAS_PRIOR_WEIGHT);
 
-  const [observations, previousRuns, markets] = await Promise.all([
+  const [observations, previousRuns, resolutionActuals, markets] = await Promise.all([
     readJsonlRecords<WeatherObservationRecord>(config.weather.datasets.observationsPath),
     readJsonlRecords<WeatherPreviousRunForecastRecord>(config.weather.datasets.previousRunForecastsPath),
+    readJsonlRecords<WeatherResolutionActualRecord>(config.weather.datasets.resolutionActualsPath),
     fetchClosedWeatherMarkets(options.date, {
       limit: Math.min(Math.max(Math.trunc(options.limit ?? 100), 1), 100),
       maxPages: Math.max(Math.trunc(options.maxPages ?? 20), 1)
     })
   ]);
-  const actualIndex = buildActualIndex(observations);
+  const actualIndex = buildActualIndex(observations, resolutionActuals);
   const forecastValuesByKey = buildForecastValueIndex(previousRuns, { leadDays, sources });
   const calibration = calibrateByMeasure(forecastValuesByKey, actualIndex, options.date, {
     halfLifeDays: calibrationHalfLifeDays,
@@ -682,12 +735,13 @@ export async function runWeatherMarketBacktest(
 
   for (const { market, entry, decisionTimeMs } of priceEntries) {
     const parsed = market.parsed;
-    const forecast = forecastIndex.get(forecastKey(parsed.city, parsed.date, parsed.measure));
+    const target = targetForClosedMarket(market);
+    const forecast = forecastIndex.get(forecastKey(target.targetKey, parsed.date, parsed.measure));
     if (!forecast) {
       skippedNoForecast += 1;
       continue;
     }
-    const actualC = actualValue(actualIndex.get(observationKey(parsed.city, parsed.date)), parsed.measure);
+    const actualC = actualValue(actualIndex.get(observationKey(target.targetKey, parsed.date)), parsed.measure);
     if (actualC === undefined) skippedNoActual += 1;
     if (!entry || decisionTimeMs === undefined) {
       skippedNoPrice += 1;
@@ -704,7 +758,7 @@ export async function runWeatherMarketBacktest(
       skippedNoForecast += 1;
       continue;
     }
-    const calibratedMeanC = forecast.meanC + calibrationBiasForCity(calibrationForMeasure, parsed.city);
+    const calibratedMeanC = forecast.meanC + calibrationBiasForTarget(calibrationForMeasure, target.targetKey);
     const fairYes = probabilityInRange(
       calibratedMeanC,
       calibrationForMeasure.sigmaC,
@@ -732,6 +786,8 @@ export async function runWeatherMarketBacktest(
       marketSlug: market.marketSlug,
       question: market.question,
       city: parsed.city,
+      forecastTargetKey: target.targetKey,
+      resolutionStationId: target.stationId,
       date: parsed.date,
       measure: parsed.measure,
       outcomeLabel: parsed.outcome.label,
@@ -774,7 +830,7 @@ export async function runWeatherMarketBacktest(
 
     const byGroup = new Map<string, Array<{ candidate: BacktestSizingCandidate; index: number }>>();
     for (const [index, candidate] of candidates.entries()) {
-      const key = `${normalizeCityKey(candidate.city)}|${candidate.date}|${candidate.measure}`;
+      const key = `${candidate.forecastTargetKey}|${candidate.date}|${candidate.measure}`;
       const group = byGroup.get(key) ?? [];
       group.push({ candidate, index });
       byGroup.set(key, group);

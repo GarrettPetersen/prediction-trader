@@ -20,6 +20,8 @@ export interface WeatherStationInfo {
   country?: string;
 }
 
+export type WeatherForecastTargetKind = "resolution_station" | "city" | "location";
+
 export interface WeatherStationForecastTarget {
   resolutionSource?: string;
   resolution: ParsedResolutionSource;
@@ -49,6 +51,30 @@ function stringValue(value: unknown): string | undefined {
 function numberValue(value: unknown): number | undefined {
   const number = Number(value);
   return Number.isFinite(number) ? number : undefined;
+}
+
+export function normalizeWeatherCityKey(value: string | undefined): string {
+  const normalized = (value ?? "")
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  if (normalized === "new york city") return "new york";
+  return normalized;
+}
+
+export function weatherCityTargetKey(city: string | undefined): string {
+  return `city:${normalizeWeatherCityKey(city)}`;
+}
+
+export function weatherStationTargetKey(stationId: string | undefined): string | undefined {
+  const normalized = stationId?.trim().toUpperCase();
+  return normalized ? `station:${normalized}` : undefined;
+}
+
+export function weatherLocationTargetKey(location: { latitude: number; longitude: number }): string {
+  return `location:${location.latitude.toFixed(4)},${location.longitude.toFixed(4)}`;
 }
 
 export function parseResolutionSource(source: string | undefined): ParsedResolutionSource {
