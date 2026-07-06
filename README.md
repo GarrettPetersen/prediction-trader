@@ -476,6 +476,7 @@ npm run weather:reinvest -- \
   --kelly-multiplier 0.25 \
   --max-kelly-fraction 0.25 \
   --min-cash-to-reinvest 5 \
+  --target-cash-reserve 20 \
   --min-confidence medium \
   --entry-start-local-time 20:00 \
   --entry-end-local-time 23:30 \
@@ -493,9 +494,12 @@ not touch Polymarket. Add `--execute` only after `PREDICTION_TRADER_LIVE=1` is
 set and the dry-run report looks sane.
 
 After selling locked weather positions, the loop skips the WeatherEdge
-market/forecast scan when available cash is below `--min-cash-to-reinvest`
-defaulting to `$5`. This keeps scheduled runs cheap when there is nothing
-meaningful to deploy.
+market/forecast scan when deployable cash is below `--min-cash-to-reinvest`
+defaulting to `$5`. Deployable cash is current Vistadex USDC cash after
+subtracting `--target-cash-reserve`, which lets the bot intentionally hold a
+cash buffer instead of spending the whole float. The scheduled GitHub Actions
+loop defaults that reserve to `$20`. This keeps scheduled runs cheap when
+there is nothing meaningful to deploy.
 
 The `--bankroll` override is optional. If omitted, the command uses current
 Vistadex cash plus marked position value. For example, a `$133` bankroll with
@@ -529,6 +533,7 @@ WEATHEREDGE_KELLY_MULTIPLIER=0.25
 WEATHEREDGE_MAX_KELLY_FRACTION=0.25
 WEATHEREDGE_MIN_CONFIDENCE=medium
 WEATHEREDGE_MIN_CASH_TO_REINVEST=5
+WEATHEREDGE_TARGET_CASH_RESERVE=20
 WEATHEREDGE_ENTRY_START_LOCAL_TIME=20:00
 WEATHEREDGE_ENTRY_END_LOCAL_TIME=23:30
 WEATHEREDGE_SKIP_CLIMATOLOGY=0

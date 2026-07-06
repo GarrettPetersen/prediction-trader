@@ -1090,7 +1090,7 @@ Commands:
   weather:backtest --city CITY [--country CODE] --date YYYY-MM-DD [--measure temperature_high|temperature_low] [--years N] [--threshold N]
   weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--sizing independent-kelly|city-portfolio] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--max-group-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N]
   weather:resolution-audit [--date YYYY-MM-DD | --days-ahead N] [--status active|closed] [--distance-ok-km N] [--distance-warn-km N] [--top N]
-  weather:reinvest [--execute] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--min-cash-to-reinvest N] [--min-confidence low|medium|high] [--entry-start-local-time HH:MM] [--entry-end-local-time HH:MM] [--report-path PATH]
+  weather:reinvest [--execute] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--min-cash-to-reinvest N] [--target-cash-reserve N] [--min-confidence low|medium|high] [--entry-start-local-time HH:MM] [--entry-end-local-time HH:MM] [--report-path PATH]
   weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N]
   weather:dataset:observations (--city CITY [--country CODE] | --latitude N --longitude N) --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--ncei-station ID | --ncei-location ID] [--path PATH]
   weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--path PATH]
@@ -1462,6 +1462,7 @@ async function run(): Promise<void> {
       minSellShares: numberArg(args, "min-sell-shares", false),
       minTradeUsd: numberArg(args, "min-trade", false),
       minCashToReinvestUsd: numberArg(args, "min-cash-to-reinvest", false),
+      targetCashReserveUsd: numberArg(args, "target-cash-reserve", false) ?? numberArg(args, "target-cash", false),
       maxBuys: numberArg(args, "max-buys", false),
       minConfidence: weatherReinvestConfidenceArg(args),
       buyMinExecutableEdge: numberArg(args, "buy-min-executable-edge", false),

@@ -61,6 +61,7 @@ export interface WeatherReinvestOptions extends Pick<
   minSellShares?: number;
   minTradeUsd?: number;
   minCashToReinvestUsd?: number;
+  targetCashReserveUsd?: number;
   maxBuys?: number;
   minConfidence?: WeatherReinvestConfidence;
   buyMinExecutableEdge?: number;
@@ -111,6 +112,8 @@ export interface WeatherReinvestReport {
   final: WeatherReinvestStateSummary;
   bankrollUsd: number;
   bankrollSource: "computed_vistadex_mark_to_mid" | "override";
+  targetCashReserveUsd: number;
+  deployableCashUsd: number;
   targetDate: string;
   weatherEdge: Pick<
     WeatherEdgeReport,
@@ -156,6 +159,10 @@ function numberValue(value: unknown): number | undefined {
 
 function roundUsd(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+export function deployableWeatherCash(cashUsd: number, targetCashReserveUsd = 0): number {
+  return roundUsd(Math.max(0, cashUsd - Math.max(0, targetCashReserveUsd)));
 }
 
 function isWeatherPosition(position: VistadexPosition): boolean {
@@ -707,8 +714,10 @@ export async function runWeatherReinvestment(
     : withCashUsd(observedAfterSellState, effectivePostSellCashUsd);
   const bankrollUsd = options.bankrollUsd ?? afterSellState.summary.computedBankrollUsd;
   const minCashToReinvestUsd = Math.max(0, options.minCashToReinvestUsd ?? 5);
+  const targetCashReserveUsd = Math.max(0, options.targetCashReserveUsd ?? 0);
+  const deployableCashUsd = deployableWeatherCash(afterSellState.cashUsd, targetCashReserveUsd);
   const targetDate = targetDateFromOptions(options);
-  const skippedBeforeScan = afterSellState.cashUsd < minCashToReinvestUsd;
+  const skippedBeforeScan = deployableCashUsd < minCashToReinvestUsd;
   const edgeReport = skippedBeforeScan
     ? undefined
     : await computeWeatherEdgeReport(config, {
@@ -738,7 +747,7 @@ export async function runWeatherReinvestment(
       ledgerPath,
       edgeReport,
       afterSellState.positions,
-      afterSellState.cashUsd,
+      deployableCashUsd,
       bankrollUsd,
       buyOptions
     )
@@ -747,7 +756,7 @@ export async function runWeatherReinvestment(
       skipped: [{
         action: "buy_edge" as const,
         status: "skipped" as const,
-        reason: `Available cash ${afterSellState.cashUsd.toFixed(2)} is below min cash to reinvest ${minCashToReinvestUsd.toFixed(2)}; skipped WeatherEdge scan.`
+        reason: `Deployable cash ${deployableCashUsd.toFixed(2)} after target reserve ${targetCashReserveUsd.toFixed(2)} is below min cash to reinvest ${minCashToReinvestUsd.toFixed(2)}; skipped WeatherEdge scan.`
       }],
       warnings: []
     };
@@ -782,6 +791,8 @@ export async function runWeatherReinvestment(
     final: finalState.summary,
     bankrollUsd: roundUsd(bankrollUsd),
     bankrollSource: options.bankrollUsd === undefined ? "computed_vistadex_mark_to_mid" : "override",
+    targetCashReserveUsd: roundUsd(targetCashReserveUsd),
+    deployableCashUsd: roundUsd(deployableWeatherCash(finalState.cashUsd, targetCashReserveUsd)),
     targetDate: edgeReport?.targetDate ?? targetDate,
     weatherEdge: edgeReport
       ? {
@@ -804,7 +815,7 @@ export async function runWeatherReinvestment(
       ...buyResult.warnings,
       ...cashWarnings,
       ...(skippedBeforeScan
-        ? [`Skipped WeatherEdge scan because available cash ${afterSellState.cashUsd.toFixed(2)} is below ${minCashToReinvestUsd.toFixed(2)}.`]
+        ? [`Skipped WeatherEdge scan because deployable cash ${deployableCashUsd.toFixed(2)} after target reserve ${targetCashReserveUsd.toFixed(2)} is below ${minCashToReinvestUsd.toFixed(2)}.`]
         : [])
     ]
   };

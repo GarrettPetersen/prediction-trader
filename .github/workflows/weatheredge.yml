@@ -31,6 +31,7 @@ jobs:
       WEATHEREDGE_MAX_KELLY_FRACTION: ${{ vars.WEATHEREDGE_MAX_KELLY_FRACTION || '0.25' }}
       WEATHEREDGE_MIN_CONFIDENCE: ${{ vars.WEATHEREDGE_MIN_CONFIDENCE || 'medium' }}
       WEATHEREDGE_MIN_CASH_TO_REINVEST: ${{ vars.WEATHEREDGE_MIN_CASH_TO_REINVEST || '5' }}
+      WEATHEREDGE_TARGET_CASH_RESERVE: ${{ vars.WEATHEREDGE_TARGET_CASH_RESERVE || '20' }}
       WEATHEREDGE_ENTRY_START_LOCAL_TIME: ${{ vars.WEATHEREDGE_ENTRY_START_LOCAL_TIME || '20:00' }}
       WEATHEREDGE_ENTRY_END_LOCAL_TIME: ${{ vars.WEATHEREDGE_ENTRY_END_LOCAL_TIME || '23:30' }}
       WEATHEREDGE_SKIP_CLIMATOLOGY: ${{ vars.WEATHEREDGE_SKIP_CLIMATOLOGY || '0' }}
@@ -74,7 +75,7 @@ jobs:
       - name: Run WeatherEdge reinvestment loop
         run: |
           mkdir -p data/trades
-          ARGS="--days-ahead 1 --max-per-trade ${WEATHEREDGE_MAX_PER_TRADE} --max-buys ${WEATHEREDGE_MAX_BUYS} --max-group-fraction ${WEATHEREDGE_MAX_GROUP_FRACTION} --kelly-multiplier ${WEATHEREDGE_KELLY_MULTIPLIER} --max-kelly-fraction ${WEATHEREDGE_MAX_KELLY_FRACTION} --min-confidence ${WEATHEREDGE_MIN_CONFIDENCE} --min-cash-to-reinvest ${WEATHEREDGE_MIN_CASH_TO_REINVEST} --entry-start-local-time ${WEATHEREDGE_ENTRY_START_LOCAL_TIME} --entry-end-local-time ${WEATHEREDGE_ENTRY_END_LOCAL_TIME} --report-path data/trades/weatheredge-report.json"
+          ARGS="--days-ahead 1 --max-per-trade ${WEATHEREDGE_MAX_PER_TRADE} --max-buys ${WEATHEREDGE_MAX_BUYS} --max-group-fraction ${WEATHEREDGE_MAX_GROUP_FRACTION} --kelly-multiplier ${WEATHEREDGE_KELLY_MULTIPLIER} --max-kelly-fraction ${WEATHEREDGE_MAX_KELLY_FRACTION} --min-confidence ${WEATHEREDGE_MIN_CONFIDENCE} --min-cash-to-reinvest ${WEATHEREDGE_MIN_CASH_TO_REINVEST} --target-cash-reserve ${WEATHEREDGE_TARGET_CASH_RESERVE} --entry-start-local-time ${WEATHEREDGE_ENTRY_START_LOCAL_TIME} --entry-end-local-time ${WEATHEREDGE_ENTRY_END_LOCAL_TIME} --report-path data/trades/weatheredge-report.json"
 
           if [ -n "${WEATHEREDGE_BANKROLL}" ]; then
             ARGS="${ARGS} --bankroll ${WEATHEREDGE_BANKROLL}"
