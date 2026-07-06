@@ -608,6 +608,18 @@ function compactWeatherResolutionActualRecord(record: WeatherResolutionActualRec
     stationId: record.resolutionStationId,
     stationName: record.resolutionStationName,
     timezone: record.timezone,
+    resolution: record.resolution
+      ? {
+        provider: record.resolution.provider,
+        ok: record.resolution.ok,
+        highF: formatFahrenheit(record.resolution.maxTempC),
+        lowF: formatFahrenheit(record.resolution.minTempC),
+        rawUnit: record.resolution.rawUnit,
+        url: record.resolution.url,
+        note: record.resolution.note,
+        error: record.resolution.error
+      }
+      : undefined,
     wunderground: record.wunderground
       ? {
         ok: record.wunderground.ok,
@@ -628,13 +640,16 @@ function compactWeatherResolutionActualRecord(record: WeatherResolutionActualRec
       }
       : undefined,
     extremeF: {
+      resolution: formatFahrenheit(record.extremeC?.resolution),
       wunderground: formatFahrenheit(record.extremeC?.wunderground),
       metar: formatFahrenheit(record.extremeC?.metar),
+      deltaMetarMinusResolution: formatFahrenheitDelta(record.extremeC?.deltaMetarMinusResolution),
       deltaMetarMinusWunderground: formatFahrenheitDelta(record.extremeC?.deltaMetarMinusWunderground)
     },
     outcomes: record.outcomes.map((outcome) => ({
       marketSlug: outcome.marketSlug,
       outcomeLabel: outcome.outcomeLabel,
+      resolutionYes: outcome.resolutionYes,
       wundergroundYes: outcome.wundergroundYes,
       metarYes: outcome.metarYes
     })),

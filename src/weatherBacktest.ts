@@ -459,7 +459,7 @@ function buildActualIndex(
     });
   }
   for (const record of resolutionActuals) {
-    const valueC = record.extremeC?.wunderground ?? record.extremeC?.metar;
+    const valueC = record.extremeC?.resolution ?? record.extremeC?.wunderground ?? record.extremeC?.metar;
     const stationTarget = weatherStationTargetKey(record.resolutionStationId);
     if (stationTarget) {
       setActualIndexValue(index, stationTarget, record.date, record.measure, valueC);

@@ -387,14 +387,14 @@ npm run weather:midday -- \
 `weather:midday` is a read-only scanner for partially complete station-day
 weather markets. It fetches the Vistadex event metadata for either
 `--held-vistadex` positions or explicit `--slug/--slugs`, extracts the
-Wunderground station from the resolution source, pulls same-day METAR
-observations from AviationWeather when a station is available, and combines
-the observed high/low so far with remaining-hour GFS, ECMWF, UKMO, and NWS
-forecasts for that station. Hong Kong markets can also use the Hong Kong
-Observatory, but only when the market explicitly references HKO, Hong Kong
-Observatory, or weather.gov.hk; then HKO daily forecasts participate even
-though they are not hourly, and HKO current readings are the same-day observed
-feed. For high-temperature markets, a bin whose upper edge has already been
+settlement station/feed from the resolution source, pulls same-day station
+observations when available, and combines the observed high/low so far with
+remaining-hour GFS, ECMWF, UKMO, and NWS forecasts for that station. Hong Kong
+markets can also use the Hong Kong Observatory, but only when the market
+explicitly references HKO, Hong Kong Observatory, or weather.gov.hk; then HKO
+daily forecasts participate even though they are not hourly, and HKO current
+readings are the same-day observed feed. For high-temperature markets, a bin
+whose upper edge has already been
 crossed is priced at zero; for low-temperature markets, a bin whose lower edge
 has already been crossed is priced at zero. When no forecast hours remain in
 the local station day, the observed station extreme deterministically locks the
@@ -404,10 +404,12 @@ are skipped unless same-day resolution-station observations are present.
 Pass `--reports --resolution-actuals` to include a resolution-source check in
 each group. The check confirms the forecast coordinates are at the settlement
 station, reports per-source distance from that station, and makes a best-effort
-fetch of the dated Wunderground history page so forecast/observed values can be
-compared against the exact settlement-source daily high/low. If the
-Wunderground page payload cannot be parsed, the check reports that explicitly
-rather than substituting a nearby NOAA or METAR feed as if it were exact. The
+fetch of the dated settlement-source daily high/low where we know how to get
+it: Wunderground daily history for Wunderground markets, HKO Daily Extract JSON
+for Hong Kong Observatory markets, and the same Weather.gov/Synoptic timeseries
+endpoint used by the Weather.gov page for NOAA timeseries markets. If that
+exact source cannot be parsed, the check reports that explicitly rather than
+substituting a nearby NOAA or METAR feed as if it were exact. The
 output ranks YES/NO edges and fractional-Kelly sizes, but it does not quote or
 execute trades. Always request a venue quote before trading because the
 displayed event price can differ from the executable RFQ.
@@ -620,15 +622,23 @@ npm run weather:dataset:resolution-actuals -- \
 ```
 
 This reads the latest saved market snapshot, resolves each market group to its
-Wunderground settlement station, and writes records to
+settlement source, and writes records to
 `WEATHER_RESOLUTION_ACTUALS_PATH`. Each record stores:
 
-- A best-effort parse of the dated Wunderground daily history page.
-- The free AviationWeather METAR station-day high/low for the same station.
-- Per-bucket `wundergroundYes` and `metarYes` flags so we can see whether the
-  free feed would resolve the market the same way as the settlement page.
-- Warnings when the exact Wunderground page cannot be parsed or when the METAR
-  extreme differs materially from the parsed settlement value.
+- `resolution`: the best exact settlement-source daily high/low we can fetch
+  for the market, currently Weather.com historical station observations for
+  Wunderground-resolved markets, HKO Daily Extract JSON, or Weather.gov/Synoptic
+  station timeseries.
+- `wunderground`: the legacy Wunderground parse when the market resolves by
+  Wunderground, kept for old backtest compatibility.
+- `metar`: the free AviationWeather METAR station-day high/low where a station
+  METAR feed exists; this is diagnostic unless it is explicitly the fallback
+  for a Weather.gov timeseries market.
+- Per-bucket `resolutionYes`, `wundergroundYes`, and `metarYes` flags so we can
+  audit whether proxy feeds would resolve the market the same way as the exact
+  settlement source.
+- Warnings when the exact source cannot be parsed or when a proxy station feed
+  differs materially from the parsed settlement value.
 
 Collect historical day-ahead forecasts for dates that have already happened:
 
@@ -765,9 +775,10 @@ Current WeatherEdge limits:
   shape checks. If Gamma tagging changes, use `--include-unparsed` to inspect
   misses.
 - Day-ahead forecast pricing does not use live observed running highs. Use
-  `weather:midday` for same-day station markets: AviationWeather METARs cover
-  Wunderground-style station resolution where available, and HKO covers markets
-  that explicitly resolve to Hong Kong Observatory/HKO/weather.gov.hk. If
+  `weather:midday` for same-day station markets: exact resolution-source
+  actuals are available for Wunderground, HKO Daily Extract, and Weather.gov
+  timeseries markets where the public source can be fetched; AviationWeather
+  METARs remain a proxy/fallback for station diagnostics. If
   `weather:edges --allow-started-day` is used for inspection, rows from
   already-started market-local days are downgraded to `SKIP`; use
   `weather:midday` for actual intraday signal generation.

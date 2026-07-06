@@ -22,7 +22,7 @@ import {
   probabilityInRange
 } from "./weatherPricing.js";
 import {
-  fetchWundergroundDailyActual,
+  fetchResolutionDailyActual,
   type WeatherResolutionDailyActual
 } from "./weatherResolutionData.js";
 import {
@@ -775,15 +775,15 @@ async function buildMiddayResolutionCheck(input: {
 
   const unitHint = input.group.markets[0]?.parsed.outcome.unit;
   const exactActual = input.fetchResolutionActuals
-    ? await fetchWundergroundDailyActual(
+    ? await fetchResolutionDailyActual(
       input.config,
       input.target.resolution,
       input.group.date,
-      { unitHint }
+      { unitHint, timezone: input.consensus.timezone }
     )
     : undefined;
   if (exactActual && !exactActual.ok) {
-    warnings.push(exactActual.error ?? exactActual.note ?? "Exact Wunderground resolution actual was unavailable.");
+    warnings.push(exactActual.error ?? exactActual.note ?? "Exact resolution actual was unavailable.");
   }
 
   const actualExtremeC = exactActual?.ok

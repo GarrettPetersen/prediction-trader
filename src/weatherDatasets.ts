@@ -20,7 +20,7 @@ import {
   type MiddayStationObservation
 } from "./weatherMidday.js";
 import {
-  fetchWundergroundDailyActual,
+  fetchResolutionDailyActual,
   type WeatherResolutionDailyActual
 } from "./weatherResolutionData.js";
 import { inferWeatherTimeZone } from "./weatherTradingWindow.js";
@@ -205,6 +205,7 @@ export interface WeatherResolutionOutcomeRecord {
   outcomeLabel: string;
   lowerTempC?: number;
   upperTempC?: number;
+  resolutionYes?: boolean;
   wundergroundYes?: boolean;
   metarYes?: boolean;
 }
@@ -224,6 +225,7 @@ export interface WeatherResolutionActualRecord {
   resolutionStationName?: string;
   timezone?: string;
   forecastLocation?: Pick<WeatherLocation, "name" | "latitude" | "longitude" | "timezone" | "countryCode" | "country" | "admin1">;
+  resolution?: WeatherResolutionDailyActual;
   wunderground?: WeatherResolutionDailyActual;
   metar?: {
     stationId: string;
@@ -235,8 +237,10 @@ export interface WeatherResolutionActualRecord {
     lowSoFarC?: number;
   };
   extremeC?: {
+    resolution?: number;
     wunderground?: number;
     metar?: number;
+    deltaMetarMinusResolution?: number;
     deltaMetarMinusWunderground?: number;
   };
   outcomes: WeatherResolutionOutcomeRecord[];
@@ -1112,6 +1116,7 @@ function outcomeContainsExtreme(outcome: WeatherMarketCandidate["parsed"]["outco
 
 function resolutionOutcomeRecords(
   group: WeatherMarketGroup,
+  resolutionExtremeC: number | undefined,
   wundergroundExtremeC: number | undefined,
   metarExtremeC: number | undefined
 ): WeatherResolutionOutcomeRecord[] {
@@ -1121,6 +1126,7 @@ function resolutionOutcomeRecords(
     outcomeLabel: market.parsed.outcome.label,
     lowerTempC: market.parsed.outcome.lowerTempC,
     upperTempC: market.parsed.outcome.upperTempC,
+    resolutionYes: outcomeContainsExtreme(market.parsed.outcome, resolutionExtremeC),
     wundergroundYes: outcomeContainsExtreme(market.parsed.outcome, wundergroundExtremeC),
     metarYes: outcomeContainsExtreme(market.parsed.outcome, metarExtremeC)
   }));
@@ -1163,7 +1169,7 @@ async function buildWeatherResolutionActualRecord(
     ? resolutionTimezone(forecastTarget.location, station)
     : undefined;
   let observation: MiddayStationObservation | undefined;
-  if (station && timezone) {
+  if (station && timezone && station.id.toUpperCase() !== "HKO") {
     try {
       observation = summarizeStationObservations(
         station.id,
@@ -1182,26 +1188,45 @@ async function buildWeatherResolutionActualRecord(
   }
 
   const unitHint = group.markets[0]?.parsed.outcome.unit;
+  let resolutionActual: WeatherResolutionDailyActual | undefined;
   let wunderground: WeatherResolutionDailyActual | undefined;
-  if (options.includeWunderground && forecastTarget?.resolutionTarget.resolution) {
-    wunderground = await fetchWundergroundDailyActual(
+  if (forecastTarget?.resolutionTarget.resolution) {
+    resolutionActual = await fetchResolutionDailyActual(
       config,
       forecastTarget.resolutionTarget.resolution,
       group.date,
-      { unitHint, fetchedAt: options.fetchedAt }
+      {
+        unitHint,
+        fetchedAt: options.fetchedAt,
+        timezone,
+        hours: options.metarHours
+      }
     );
-    if (!wunderground.ok) {
-      warnings.push(wunderground.error ?? wunderground.note ?? "Wunderground actual was unavailable.");
+    if (!resolutionActual.ok) {
+      warnings.push(resolutionActual.error ?? resolutionActual.note ?? "Exact resolution actual was unavailable.");
+    }
+    if (resolutionActual.provider === "wunderground") {
+      wunderground = resolutionActual;
     }
   }
 
+  if (options.includeWunderground &&
+    forecastTarget?.resolutionTarget.resolution.provider === "wunderground" &&
+    !wunderground) {
+    wunderground = resolutionActual;
+  }
+
+  const resolutionExtremeC = extremeForMeasure(group.measure, resolutionActual);
   const wundergroundExtremeC = extremeForMeasure(group.measure, wunderground);
   const metarExtremeC = metarExtremeForMeasure(group.measure, observation);
-  const delta = wundergroundExtremeC === undefined || metarExtremeC === undefined
+  const deltaMetarMinusResolution = resolutionExtremeC === undefined || metarExtremeC === undefined
+    ? undefined
+    : metarExtremeC - resolutionExtremeC;
+  const deltaMetarMinusWunderground = wundergroundExtremeC === undefined || metarExtremeC === undefined
     ? undefined
     : metarExtremeC - wundergroundExtremeC;
-  if (delta !== undefined && Math.abs(delta) > 0.6) {
-    warnings.push(`METAR ${group.measure} differs from Wunderground by ${(delta * 9 / 5).toFixed(1)}F.`);
+  if (deltaMetarMinusResolution !== undefined && Math.abs(deltaMetarMinusResolution) > 0.6) {
+    warnings.push(`METAR ${group.measure} differs from exact resolution source by ${(deltaMetarMinusResolution * 9 / 5).toFixed(1)}F.`);
   }
 
   return {
@@ -1224,6 +1249,7 @@ async function buildWeatherResolutionActualRecord(
     resolutionStationName: station?.site,
     timezone,
     forecastLocation: compactWeatherLocation(forecastTarget?.location),
+    resolution: resolutionActual,
     wunderground,
     metar: observation
       ? {
@@ -1237,11 +1263,13 @@ async function buildWeatherResolutionActualRecord(
       }
       : undefined,
     extremeC: {
+      resolution: resolutionExtremeC,
       wunderground: wundergroundExtremeC,
       metar: metarExtremeC,
-      deltaMetarMinusWunderground: delta
+      deltaMetarMinusResolution,
+      deltaMetarMinusWunderground
     },
-    outcomes: resolutionOutcomeRecords(group, wundergroundExtremeC, metarExtremeC),
+    outcomes: resolutionOutcomeRecords(group, resolutionExtremeC, wundergroundExtremeC, metarExtremeC),
     warnings: [...new Set(warnings)],
     errors
   };

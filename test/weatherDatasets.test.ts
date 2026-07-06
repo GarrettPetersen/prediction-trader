@@ -183,9 +183,22 @@ describe("weather dataset stores", () => {
       measure: "temperature_high",
       resolutionStationId: "EGLL",
       timezone: "Europe/London",
+      resolution: {
+        provider: "wunderground",
+        stationId: "EGLL",
+        date: "2026-07-04",
+        url: "https://www.wunderground.com/history/daily/gb/london/EGLL/date/2026-7-4",
+        fetchedAt: "2026-07-05T00:00:00.000Z",
+        ok: true,
+        maxTempC: 22,
+        minTempC: 14,
+        rawUnit: "C"
+      },
       extremeC: {
+        resolution: 22,
         wunderground: 22,
         metar: 21.8,
+        deltaMetarMinusResolution: -0.2,
         deltaMetarMinusWunderground: -0.2
       },
       outcomes: [{
@@ -194,6 +207,7 @@ describe("weather dataset stores", () => {
         outcomeLabel: "20C",
         lowerTempC: 19.5,
         upperTempC: 20.5,
+        resolutionYes: false,
         wundergroundYes: false,
         metarYes: false
       }],
