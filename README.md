@@ -25,12 +25,14 @@ live execution difficult to trigger by accident.
   Kong; and NOAA NCEI CDO for token-gated historical climatology.
 - Records executed trades/redemptions and backfilled venue state to a local
   JSONL ledger for audit and PnL reconstruction.
+- Runs an optional scheduled Vistadex WeatherEdge reinvestment loop through
+  GitHub Actions.
 - Requires explicit live-trading gates before any command can submit a trade.
 - Keeps wallet keys and API credentials out of source control.
 
-This is not a mature strategy engine yet. It has execution plumbing plus a
-small, inspectable football model that can generate candidate bets for human or
-agent review.
+This is not a mature strategy engine yet. It has execution plumbing, football
+and weather models, and a narrowly scoped automated weather-trading loop that
+still needs careful monitoring.
 
 ## Safety Model
 
@@ -143,6 +145,7 @@ WEATHER_MARKET_SNAPSHOTS_PATH=data/weather/markets/polymarket-weather-snapshots.
 WEATHER_FORECAST_SNAPSHOTS_PATH=data/weather/forecasts/provider-forecasts.jsonl
 WEATHER_PREVIOUS_RUN_FORECASTS_PATH=data/weather/forecasts/openmeteo-previous-runs.jsonl
 WEATHER_BACKTEST_RUNS_PATH=data/weather/backtests/weatheredge-runs.jsonl
+WEATHER_RESOLUTION_ACTUALS_PATH=data/weather/resolution/weather-resolution-actuals.jsonl
 ```
 
 Open-Meteo, NWS, and HKO do not require secrets for the basic pulls implemented
@@ -152,8 +155,8 @@ daily-data responses are cached under `WEATHER_CACHE_DIR` so repeated scans do
 not burn quota fetching the same climatology dates. The three
 `WEATHER_*_PATH` dataset files are durable local JSONL stores for actual NOAA
 observations, Polymarket weather market snapshots, provider forecast snapshots,
-Open-Meteo previous-run forecasts for already-resolved dates, and WeatherEdge
-model runs; they are ignored by git.
+Open-Meteo previous-run forecasts for already-resolved dates, settlement-source
+actuals, and WeatherEdge model runs; they are ignored by git.
 
 ## Commands
 
@@ -460,6 +463,96 @@ npm run weather:run -- \
   --kelly-multiplier 0.25
 ```
 
+Run the Vistadex WeatherEdge reinvestment loop locally:
+
+```bash
+npm run weather:reinvest -- \
+  --days-ahead 1 \
+  --max-per-trade 10 \
+  --max-buys 8 \
+  --max-group-fraction 0.25 \
+  --kelly-multiplier 0.25 \
+  --max-kelly-fraction 0.25 \
+  --min-cash-to-reinvest 5 \
+  --min-confidence medium \
+  --report-path data/trades/weatheredge-report.json
+```
+
+That command checks current Vistadex cash and positions, quotes weather
+positions that are effectively locked at `0.99+`, sells only if the live RFQ is
+still favorable, refreshes tomorrow's station-aligned weather edges, and buys
+positive-edge Vistadex weather positions with city/date portfolio sizing. It
+does not touch Polymarket. Add `--execute` only after `PREDICTION_TRADER_LIVE=1`
+is set and the dry-run report looks sane.
+
+After selling locked weather positions, the loop skips the WeatherEdge
+market/forecast scan when available cash is below `--min-cash-to-reinvest`
+defaulting to `$5`. This keeps scheduled runs cheap when there is nothing
+meaningful to deploy.
+
+The `--bankroll` override is optional. If omitted, the command uses current
+Vistadex cash plus marked position value. For example, a `$133` bankroll with
+`--max-group-fraction 0.25` permits up to `$33.25` of exposure in one
+city/station/day group, while `--max-per-trade` still caps each individual RFQ.
+
+### GitHub Actions Weather Loop
+
+The repo includes `.github/workflows/weatheredge.yml`, scheduled every three
+hours at minute 17. It is dry-run by default. To allow live Vistadex weather
+trading, configure repository secrets:
+
+```text
+VISTADEX_CLIENT_API_KEY
+VISTADEX_SECRET_KEY
+NOAA_CDO_TOKEN
+```
+
+`NOAA_CDO_TOKEN` is optional but recommended. Without it, live pricing skips
+the climatology prior and relies on forecast models only.
+
+Configure repository variables:
+
+```text
+WEATHEREDGE_LIVE=0
+WEATHEREDGE_BANKROLL=
+WEATHEREDGE_MAX_PER_TRADE=10
+WEATHEREDGE_MAX_BUYS=8
+WEATHEREDGE_MAX_GROUP_FRACTION=0.25
+WEATHEREDGE_KELLY_MULTIPLIER=0.25
+WEATHEREDGE_MAX_KELLY_FRACTION=0.25
+WEATHEREDGE_MIN_CONFIDENCE=medium
+WEATHEREDGE_MIN_CASH_TO_REINVEST=5
+WEATHEREDGE_SKIP_CLIMATOLOGY=0
+PREDICTION_TRADER_MAX_USD=10
+NWS_USER_AGENT=prediction-trader/0.1 weatheredge github-actions
+```
+
+The workflow sets `TZ=America/Vancouver`, so `--days-ahead 1` means tomorrow
+from British Columbia rather than UTC. It restores and saves `.cache/weatheredge`
+with `actions/cache` so NOAA station/data responses and similar implementation
+caches survive between runs. It also uploads `data/trades/ledger.jsonl` and
+`data/trades/weatheredge-report.json` as run artifacts.
+
+The ignored `data/weather/**/*.jsonl` datasets are not required for this live
+loop to start. The live loop fetches current market pages, current forecasts,
+and current Vistadex state on every run. Those ignored datasets are for
+backtesting, calibration research, settlement-source audits, and later PnL
+analysis. GitHub Actions artifacts/cache are convenient but not a durable
+database; if this becomes production, move the ledger, price snapshots,
+forecasts, and settlement actuals into durable storage such as Cloudflare D1,
+R2, S3, Postgres, or a private database service.
+
+Recommended rollout:
+
+1. Leave `WEATHEREDGE_LIVE=0` and run the workflow manually.
+2. Inspect the uploaded `weatheredge-report.json`.
+3. Set `WEATHEREDGE_BANKROLL` if the computed Vistadex-only bankroll is not the
+   risk budget you want.
+4. Set `WEATHEREDGE_LIVE=1`.
+5. Trigger one manual run with `execute=true`.
+6. Let the three-hour schedule continue only after the first live artifact and
+   Vistadex activity both look right.
+
 Backtest the NOAA climatology prior for a city/date:
 
 ```bash
@@ -663,9 +756,9 @@ slippage, and realized outcomes.
 
 Current WeatherEdge limits:
 
-- Live auto-execution is intentionally disabled in `weather:run`. Use
-  `weather:signals` to inspect candidates, then place explicit reviewed orders
-  through venue-specific commands if trading is permitted.
+- Live auto-execution exists only in the narrowly scoped `weather:reinvest`
+  Vistadex WeatherEdge loop. `weather:run` remains paper-only, and Polymarket is
+  not traded by the scheduled loop.
 - The parser currently targets city daily high/low temperature ladders. Global
   monthly temperature anomaly and record-rank markets are intentionally skipped.
 - Polymarket weather discovery uses the public Gamma `weather` tag and keyword

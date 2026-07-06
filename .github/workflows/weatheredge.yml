@@ -1,0 +1,99 @@
+name: WeatherEdge Reinvestment
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: "Execute live trades when WEATHEREDGE_LIVE is 1"
+        required: false
+        default: "false"
+
+concurrency:
+  group: weatheredge-reinvest
+  cancel-in-progress: false
+
+jobs:
+  reinvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      TZ: America/Vancouver
+      WEATHEREDGE_LIVE: ${{ vars.WEATHEREDGE_LIVE || '0' }}
+      WEATHEREDGE_BANKROLL: ${{ vars.WEATHEREDGE_BANKROLL }}
+      WEATHEREDGE_MAX_PER_TRADE: ${{ vars.WEATHEREDGE_MAX_PER_TRADE || '10' }}
+      WEATHEREDGE_MAX_BUYS: ${{ vars.WEATHEREDGE_MAX_BUYS || '8' }}
+      WEATHEREDGE_MAX_GROUP_FRACTION: ${{ vars.WEATHEREDGE_MAX_GROUP_FRACTION || '0.25' }}
+      WEATHEREDGE_KELLY_MULTIPLIER: ${{ vars.WEATHEREDGE_KELLY_MULTIPLIER || '0.25' }}
+      WEATHEREDGE_MAX_KELLY_FRACTION: ${{ vars.WEATHEREDGE_MAX_KELLY_FRACTION || '0.25' }}
+      WEATHEREDGE_MIN_CONFIDENCE: ${{ vars.WEATHEREDGE_MIN_CONFIDENCE || 'medium' }}
+      WEATHEREDGE_MIN_CASH_TO_REINVEST: ${{ vars.WEATHEREDGE_MIN_CASH_TO_REINVEST || '5' }}
+      WEATHEREDGE_SKIP_CLIMATOLOGY: ${{ vars.WEATHEREDGE_SKIP_CLIMATOLOGY || '0' }}
+      WEATHEREDGE_SHOULD_EXECUTE: ${{ github.event_name == 'schedule' || inputs.execute == 'true' }}
+      PREDICTION_TRADER_LIVE: ${{ vars.WEATHEREDGE_LIVE || '0' }}
+      PREDICTION_TRADER_MAX_USD: ${{ vars.PREDICTION_TRADER_MAX_USD || vars.WEATHEREDGE_MAX_PER_TRADE || '10' }}
+      PREDICTION_TRADER_LEDGER_PATH: data/trades/ledger.jsonl
+      WEATHER_CACHE_DIR: .cache/weatheredge
+      VISTADEX_CLIENT_API_KEY: ${{ secrets.VISTADEX_CLIENT_API_KEY }}
+      VISTADEX_SECRET_KEY: ${{ secrets.VISTADEX_SECRET_KEY }}
+      VISTADEX_RPC_URL: ${{ vars.VISTADEX_RPC_URL || 'https://api.mainnet-beta.solana.com' }}
+      VISTADEX_POSITIONS_API_URL: ${{ vars.VISTADEX_POSITIONS_API_URL || 'https://markets.vistadex.com' }}
+      VISTADEX_APP_URL: ${{ vars.VISTADEX_APP_URL || 'https://www.app.vistadex.com' }}
+      NOAA_CDO_TOKEN: ${{ secrets.NOAA_CDO_TOKEN }}
+      NWS_USER_AGENT: ${{ vars.NWS_USER_AGENT || 'prediction-trader/0.1 weatheredge github-actions' }}
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Restore WeatherEdge cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/weatheredge
+          key: weatheredge-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            weatheredge-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run build
+
+      - name: Run WeatherEdge reinvestment loop
+        run: |
+          mkdir -p data/trades
+          ARGS="--days-ahead 1 --max-per-trade ${WEATHEREDGE_MAX_PER_TRADE} --max-buys ${WEATHEREDGE_MAX_BUYS} --max-group-fraction ${WEATHEREDGE_MAX_GROUP_FRACTION} --kelly-multiplier ${WEATHEREDGE_KELLY_MULTIPLIER} --max-kelly-fraction ${WEATHEREDGE_MAX_KELLY_FRACTION} --min-confidence ${WEATHEREDGE_MIN_CONFIDENCE} --min-cash-to-reinvest ${WEATHEREDGE_MIN_CASH_TO_REINVEST} --report-path data/trades/weatheredge-report.json"
+
+          if [ -n "${WEATHEREDGE_BANKROLL}" ]; then
+            ARGS="${ARGS} --bankroll ${WEATHEREDGE_BANKROLL}"
+          fi
+
+          if [ "${WEATHEREDGE_SKIP_CLIMATOLOGY}" = "1" ]; then
+            ARGS="${ARGS} --no-climatology"
+          fi
+
+          if [ "${WEATHEREDGE_LIVE}" = "1" ] && [ "${WEATHEREDGE_SHOULD_EXECUTE}" = "true" ]; then
+            ARGS="${ARGS} --execute"
+          fi
+
+          npm run weather:reinvest -- ${ARGS}
+
+      - name: Upload WeatherEdge artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weatheredge-${{ github.run_id }}
+          path: |
+            data/trades/*.jsonl
+            data/trades/weatheredge-report.json
+          if-no-files-found: warn

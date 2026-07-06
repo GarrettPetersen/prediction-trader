@@ -98,6 +98,11 @@ import {
   type WeatherResolutionAuditRow
 } from "./weatherResolutionAudit.js";
 import {
+  runWeatherReinvestment,
+  writeWeatherReinvestReport,
+  type WeatherReinvestConfidence
+} from "./weatherReinvest.js";
+import {
   collectWeatherBacktestRunDataset,
   collectWeatherForecastSnapshotsDataset,
   collectWeatherMarketSnapshotsDataset,
@@ -969,6 +974,16 @@ function weatherSizingStrategyArg(args: Args): "independent_kelly" | "city_portf
   throw new Error("--sizing must be independent-kelly or city-portfolio.");
 }
 
+function weatherReinvestConfidenceArg(args: Args): WeatherReinvestConfidence | undefined {
+  const value = stringArg(args, "min-confidence", false);
+  if (value === undefined) return undefined;
+  const normalized = value.toUpperCase();
+  if (normalized === "LOW" || normalized === "MEDIUM" || normalized === "HIGH") {
+    return normalized;
+  }
+  throw new Error("--min-confidence must be low, medium, or high.");
+}
+
 function previousRunSourcesArg(args: Args): OpenMeteoPreviousRunSourceId[] | undefined {
   const values = listArg(args, "sources", false);
   if (values.length === 0) return undefined;
@@ -1052,6 +1067,7 @@ Commands:
   weather:backtest --city CITY [--country CODE] --date YYYY-MM-DD [--measure temperature_high|temperature_low] [--years N] [--threshold N]
   weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--sizing independent-kelly|city-portfolio] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--max-group-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N]
   weather:resolution-audit [--date YYYY-MM-DD | --days-ahead N] [--status active|closed] [--distance-ok-km N] [--distance-warn-km N] [--top N]
+  weather:reinvest [--execute] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--min-cash-to-reinvest N] [--min-confidence low|medium|high] [--report-path PATH]
   weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N]
   weather:dataset:observations (--city CITY [--country CODE] | --latitude N --longitude N) --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--ncei-station ID | --ncei-location ID] [--path PATH]
   weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--path PATH]
@@ -1393,7 +1409,44 @@ async function run(): Promise<void> {
         displayedRows: Math.min(top, report.rows.length),
         omittedRows: Math.max(0, report.rows.length - top),
         rows: report.rows.slice(0, top).map(compactWeatherResolutionAuditRow)
-      });
+    });
+    return;
+  }
+
+  if (command === "weather:reinvest") {
+    const report = await runWeatherReinvestment(config, {
+      execute,
+      ledgerPath,
+      date: stringArg(args, "date", false),
+      daysAhead: numberArg(args, "days-ahead", false),
+      limit: numberArg(args, "limit", false),
+      maxPages: numberArg(args, "max-pages", false),
+      maxEvents: numberArg(args, "max-events", false),
+      concurrency: numberArg(args, "concurrency", false),
+      minLiquidity: numberArg(args, "min-liquidity", false),
+      highGraceMinutes: numberArg(args, "high-grace-minutes", false),
+      lowGraceMinutes: numberArg(args, "low-grace-minutes", false),
+      bankrollUsd: numberArg(args, "bankroll", false),
+      maxPerTradeUsd: numberArg(args, "max-per-trade", false) ?? numberArg(args, "max-usd", false),
+      kellyMultiplier: numberArg(args, "kelly-multiplier", false),
+      maxKellyFraction: numberArg(args, "max-kelly-fraction", false),
+      maxGroupFraction: numberArg(args, "max-group-fraction", false),
+      portfolioStepUsd: numberArg(args, "portfolio-step-usd", false),
+      minEdge: numberArg(args, "min-edge", false),
+      skipClimatology: args["no-climatology"] === true ? true : undefined,
+      sellBidThreshold: numberArg(args, "sell-bid-threshold", false),
+      sellMinPrice: numberArg(args, "sell-min-price", false),
+      minSellShares: numberArg(args, "min-sell-shares", false),
+      minTradeUsd: numberArg(args, "min-trade", false),
+      minCashToReinvestUsd: numberArg(args, "min-cash-to-reinvest", false),
+      maxBuys: numberArg(args, "max-buys", false),
+      minConfidence: weatherReinvestConfidenceArg(args),
+      buyMinExecutableEdge: numberArg(args, "buy-min-executable-edge", false),
+      buyQuoteDriftUsd: numberArg(args, "buy-quote-drift", false)
+    });
+    const reportPath = stringArg(args, "report-path", false);
+    if (reportPath) await writeWeatherReinvestReport(reportPath, report);
+    print(report);
     return;
   }
 
