@@ -247,6 +247,37 @@ function tradeMayHaveMutatedState(trade: WeatherReinvestTradeResult): boolean {
   return trade.status === "filled" || trade.status === "submitted" || trade.status === "unknown";
 }
 
+function tradeCashTotalUsd(trade: WeatherReinvestTradeResult): number | undefined {
+  return trade.fill?.totalUsd ?? trade.quote?.totalUsd ?? trade.amountUsd;
+}
+
+function expectedSellProceedsUsd(trades: WeatherReinvestTradeResult[], execute: boolean): number {
+  return roundUsd(trades.reduce((sum, trade) => {
+    if (trade.status === "filled") return sum + (tradeCashTotalUsd(trade) ?? 0);
+    if (!execute && trade.status === "quoted") return sum + (tradeCashTotalUsd(trade) ?? 0);
+    return sum;
+  }, 0));
+}
+
+function expectedBuySpendUsd(trades: WeatherReinvestTradeResult[], execute: boolean): number {
+  return roundUsd(trades.reduce((sum, trade) => {
+    if (trade.status === "filled") return sum + (tradeCashTotalUsd(trade) ?? 0);
+    if (!execute && trade.status === "quoted") return sum + (tradeCashTotalUsd(trade) ?? 0);
+    return sum;
+  }, 0));
+}
+
+function withCashUsd<T extends { cashUsd: number; positions: VistadexPosition[]; summary: WeatherReinvestStateSummary }>(
+  state: T,
+  cashUsd: number
+): T {
+  return {
+    ...state,
+    cashUsd,
+    summary: stateSummary(cashUsd, state.positions)
+  };
+}
+
 async function loadVistadexState(config: AppConfig): Promise<{
   cashUsd: number;
   positions: VistadexPosition[];
@@ -605,9 +636,17 @@ export async function runWeatherReinvestment(
     initialState.positions,
     sellOptions
   );
-  const afterSellState = execute && sellResult.sold.some(tradeMayHaveMutatedState)
+  const observedAfterSellState = execute && sellResult.sold.some(tradeMayHaveMutatedState)
     ? await loadVistadexState(config)
     : initialState;
+  const sellProceedsUsd = expectedSellProceedsUsd(sellResult.sold, execute);
+  const fillImpliedPostSellCashUsd = roundUsd(initialState.cashUsd + sellProceedsUsd);
+  const effectivePostSellCashUsd = sellProceedsUsd > 0
+    ? Math.max(observedAfterSellState.cashUsd, fillImpliedPostSellCashUsd)
+    : observedAfterSellState.cashUsd;
+  const afterSellState = effectivePostSellCashUsd === observedAfterSellState.cashUsd
+    ? observedAfterSellState
+    : withCashUsd(observedAfterSellState, effectivePostSellCashUsd);
   const bankrollUsd = options.bankrollUsd ?? afterSellState.summary.computedBankrollUsd;
   const minCashToReinvestUsd = Math.max(0, options.minCashToReinvestUsd ?? 5);
   const targetDate = targetDateFromOptions(options);
@@ -653,12 +692,26 @@ export async function runWeatherReinvestment(
       }],
       warnings: []
     };
-  const finalState = execute && (
+  const observedFinalState = execute && (
     sellResult.sold.some(tradeMayHaveMutatedState) ||
     buyResult.bought.some(tradeMayHaveMutatedState)
   )
     ? await loadVistadexState(config)
     : afterSellState;
+  const buySpendUsd = expectedBuySpendUsd(buyResult.bought, execute);
+  const fillImpliedFinalCashUsd = roundUsd(Math.max(0, afterSellState.cashUsd - buySpendUsd));
+  const expectedCashChanged = sellProceedsUsd > 0 || buySpendUsd > 0;
+  const finalState = expectedCashChanged && Math.abs(observedFinalState.cashUsd - fillImpliedFinalCashUsd) > 0.01
+    ? withCashUsd(observedFinalState, fillImpliedFinalCashUsd)
+    : observedFinalState;
+  const cashWarnings = [
+    ...(sellProceedsUsd > 0 && Math.abs(observedAfterSellState.cashUsd - effectivePostSellCashUsd) > 0.01
+      ? [`Observed post-sell cash ${observedAfterSellState.cashUsd.toFixed(2)} lagged fill-implied cash ${effectivePostSellCashUsd.toFixed(2)}; using fill-implied cash for threshold and sizing.`]
+      : []),
+    ...(expectedCashChanged && Math.abs(observedFinalState.cashUsd - finalState.cashUsd) > 0.01
+      ? [`Observed final cash ${observedFinalState.cashUsd.toFixed(2)} differed from fill-implied cash ${finalState.cashUsd.toFixed(2)}; reporting fill-implied cash.`]
+      : [])
+  ];
 
   return {
     execute,
@@ -690,6 +743,7 @@ export async function runWeatherReinvestment(
     warnings: [
       ...sellResult.warnings,
       ...buyResult.warnings,
+      ...cashWarnings,
       ...(skippedBeforeScan
         ? [`Skipped WeatherEdge scan because available cash ${afterSellState.cashUsd.toFixed(2)} is below ${minCashToReinvestUsd.toFixed(2)}.`]
         : [])
