@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  assessWeatherEntryWindow,
   assessWeatherTradingWindow,
   inferWeatherTimeZone
 } from "../src/weatherTradingWindow.js";
@@ -76,5 +77,44 @@ describe("weather trading window", () => {
 
     assert.equal(assessment.safeToTrade, false);
     assert.equal(assessment.status, "timezone_unknown");
+  });
+
+  it("allows day-ahead entries in the station-local evening window", () => {
+    const assessment = assessWeatherEntryWindow({
+      targetDate: "2026-07-08",
+      countryCode: "JP",
+      now: new Date("2026-07-07T11:17:00Z")
+    });
+
+    assert.equal(assessment.shouldEnter, true);
+    assert.equal(assessment.status, "inside_entry_window");
+    assert.equal(assessment.timezone, "Asia/Tokyo");
+    assert.equal(assessment.localDate, "2026-07-07");
+    assert.equal(assessment.localTime, "20:17");
+  });
+
+  it("holds cash before the station-local evening entry window", () => {
+    const assessment = assessWeatherEntryWindow({
+      targetDate: "2026-07-08",
+      countryCode: "GB",
+      now: new Date("2026-07-07T12:17:00Z")
+    });
+
+    assert.equal(assessment.shouldEnter, false);
+    assert.equal(assessment.status, "before_entry_window");
+    assert.equal(assessment.localDate, "2026-07-07");
+    assert.equal(assessment.localTime, "13:17");
+  });
+
+  it("rejects entries once the station-local target day has started", () => {
+    const assessment = assessWeatherEntryWindow({
+      targetDate: "2026-07-08",
+      countryCode: "HK",
+      now: new Date("2026-07-07T17:30:00Z")
+    });
+
+    assert.equal(assessment.shouldEnter, false);
+    assert.equal(assessment.status, "market_day_started");
+    assert.equal(assessment.localDate, "2026-07-08");
   });
 });

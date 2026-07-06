@@ -181,6 +181,14 @@ function listArg(args: Args, key: string, required = false): string[] {
     .filter(Boolean);
 }
 
+function localTimeMinutesArg(args: Args, key: string): number | undefined {
+  const raw = stringArg(args, key, false);
+  if (raw === undefined) return undefined;
+  const match = raw.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if (!match) throw new Error(`--${key} must be in HH:MM 24-hour local time format.`);
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
 function numberListArg(args: Args, key: string): number[] | undefined {
   const values = listArg(args, key, false);
   if (values.length === 0) return undefined;
@@ -1082,7 +1090,7 @@ Commands:
   weather:backtest --city CITY [--country CODE] --date YYYY-MM-DD [--measure temperature_high|temperature_low] [--years N] [--threshold N]
   weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--sizing independent-kelly|city-portfolio] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--max-group-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N]
   weather:resolution-audit [--date YYYY-MM-DD | --days-ahead N] [--status active|closed] [--distance-ok-km N] [--distance-warn-km N] [--top N]
-  weather:reinvest [--execute] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--min-cash-to-reinvest N] [--min-confidence low|medium|high] [--report-path PATH]
+  weather:reinvest [--execute] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--min-cash-to-reinvest N] [--min-confidence low|medium|high] [--entry-start-local-time HH:MM] [--entry-end-local-time HH:MM] [--report-path PATH]
   weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N]
   weather:dataset:observations (--city CITY [--country CODE] | --latitude N --longitude N) --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--ncei-station ID | --ncei-location ID] [--path PATH]
   weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--path PATH]
@@ -1457,7 +1465,9 @@ async function run(): Promise<void> {
       maxBuys: numberArg(args, "max-buys", false),
       minConfidence: weatherReinvestConfidenceArg(args),
       buyMinExecutableEdge: numberArg(args, "buy-min-executable-edge", false),
-      buyQuoteDriftUsd: numberArg(args, "buy-quote-drift", false)
+      buyQuoteDriftUsd: numberArg(args, "buy-quote-drift", false),
+      entryStartLocalMinutes: localTimeMinutesArg(args, "entry-start-local-time"),
+      entryEndLocalMinutes: localTimeMinutesArg(args, "entry-end-local-time")
     });
     const reportPath = stringArg(args, "report-path", false);
     if (reportPath) await writeWeatherReinvestReport(reportPath, report);

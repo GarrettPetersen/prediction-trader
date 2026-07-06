@@ -477,15 +477,20 @@ npm run weather:reinvest -- \
   --max-kelly-fraction 0.25 \
   --min-cash-to-reinvest 5 \
   --min-confidence medium \
+  --entry-start-local-time 20:00 \
+  --entry-end-local-time 23:30 \
   --report-path data/trades/weatheredge-report.json
 ```
 
 That command checks current Vistadex cash and positions, quotes weather
 positions that are effectively locked at `0.99+`, sells only if the live RFQ is
 still favorable, refreshes tomorrow's station-aligned weather edges, and buys
-positive-edge Vistadex weather positions with city/date portfolio sizing. It
-does not touch Polymarket. Add `--execute` only after `PREDICTION_TRADER_LIVE=1`
-is set and the dry-run report looks sane.
+positive-edge Vistadex weather positions with city/date portfolio sizing only
+inside each market's station-local day-ahead entry window. By default that
+window is `20:00-23:30` on the local calendar day before the target date. Cash
+freed outside that window is held until a later scheduled run. The loop does
+not touch Polymarket. Add `--execute` only after `PREDICTION_TRADER_LIVE=1` is
+set and the dry-run report looks sane.
 
 After selling locked weather positions, the loop skips the WeatherEdge
 market/forecast scan when available cash is below `--min-cash-to-reinvest`
@@ -524,15 +529,22 @@ WEATHEREDGE_KELLY_MULTIPLIER=0.25
 WEATHEREDGE_MAX_KELLY_FRACTION=0.25
 WEATHEREDGE_MIN_CONFIDENCE=medium
 WEATHEREDGE_MIN_CASH_TO_REINVEST=5
+WEATHEREDGE_ENTRY_START_LOCAL_TIME=20:00
+WEATHEREDGE_ENTRY_END_LOCAL_TIME=23:30
 WEATHEREDGE_SKIP_CLIMATOLOGY=0
 PREDICTION_TRADER_MAX_USD=10
 NWS_USER_AGENT=prediction-trader/0.1 weatheredge github-actions
 ```
 
 The workflow sets `TZ=America/Vancouver`, so `--days-ahead 1` means tomorrow
-from British Columbia rather than UTC. It restores and saves `.cache/weatheredge`
-with `actions/cache` so NOAA station/data responses and similar implementation
-caches survive between runs. It also uploads `data/trades/ledger.jsonl` and
+from British Columbia rather than UTC. Candidate buys are still gated by the
+resolution station's own timezone: every three-hour run may sell locked
+positions, but it opens fresh day-ahead positions only when the station-local
+clock is inside `WEATHEREDGE_ENTRY_START_LOCAL_TIME` through
+`WEATHEREDGE_ENTRY_END_LOCAL_TIME` on the day before the target date. It
+restores and saves `.cache/weatheredge` with `actions/cache` so NOAA
+station/data responses and similar implementation caches survive between runs.
+It also uploads `data/trades/ledger.jsonl` and
 `data/trades/weatheredge-report.json` as run artifacts.
 
 The ignored `data/weather/**/*.jsonl` datasets are not required for this live

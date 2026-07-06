@@ -7,6 +7,14 @@ export type WeatherTradingWindowStatus =
   | "after_market_day"
   | "timezone_unknown";
 
+export type WeatherEntryWindowStatus =
+  | "inside_entry_window"
+  | "before_entry_window"
+  | "after_entry_window"
+  | "market_day_started"
+  | "after_market_day"
+  | "timezone_unknown";
+
 export interface WeatherTradingWindowInput {
   targetDate: string;
   measure: WeatherMeasure;
@@ -21,6 +29,19 @@ export interface WeatherTradingWindowInput {
   lowGraceMinutes?: number;
 }
 
+export interface WeatherEntryWindowInput {
+  targetDate: string;
+  timezone?: string;
+  countryCode?: string;
+  country?: string;
+  admin1?: string;
+  state?: string;
+  longitude?: number;
+  now?: Date;
+  entryStartMinutes?: number;
+  entryEndMinutes?: number;
+}
+
 export interface WeatherTradingWindowAssessment {
   safeToTrade: boolean;
   status: WeatherTradingWindowStatus;
@@ -32,8 +53,23 @@ export interface WeatherTradingWindowAssessment {
   reason: string;
 }
 
+export interface WeatherEntryWindowAssessment {
+  shouldEnter: boolean;
+  status: WeatherEntryWindowStatus;
+  timezone?: string;
+  entryLocalDate?: string;
+  localDate?: string;
+  localTime?: string;
+  minutesAfterLocalMidnight?: number;
+  entryStartMinutes: number;
+  entryEndMinutes: number;
+  reason: string;
+}
+
 const DEFAULT_HIGH_GRACE_MINUTES = 120;
 const DEFAULT_LOW_GRACE_MINUTES = 15;
+export const DEFAULT_ENTRY_START_MINUTES = 20 * 60;
+export const DEFAULT_ENTRY_END_MINUTES = 23 * 60 + 30;
 
 const COUNTRY_TIMEZONE: Record<string, string> = {
   AT: "Europe/Vienna",
@@ -189,6 +225,12 @@ function localDateTimeParts(now: Date, timezone: string): {
   };
 }
 
+function isoDateDaysFrom(date: string, days: number): string {
+  const value = new Date(`${date}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+
 export function assessWeatherTradingWindow(
   input: WeatherTradingWindowInput
 ): WeatherTradingWindowAssessment {
@@ -244,5 +286,113 @@ export function assessWeatherTradingWindow(
     reason: withinGrace
       ? `Target date has started locally, but ${local.time} is within the ${graceMinutes} minute grace window.`
       : `Target date has started locally and ${local.time} is past the ${graceMinutes} minute grace window.`
+  };
+}
+
+export function assessWeatherEntryWindow(
+  input: WeatherEntryWindowInput
+): WeatherEntryWindowAssessment {
+  const entryStartMinutes = input.entryStartMinutes ?? DEFAULT_ENTRY_START_MINUTES;
+  const entryEndMinutes = input.entryEndMinutes ?? DEFAULT_ENTRY_END_MINUTES;
+  const timezone = inferWeatherTimeZone(input);
+  if (!timezone) {
+    return {
+      shouldEnter: false,
+      status: "timezone_unknown",
+      entryStartMinutes,
+      entryEndMinutes,
+      reason: "Could not infer a market-local timezone; skip rather than enter outside the intended day-ahead window."
+    };
+  }
+
+  const local = localDateTimeParts(input.now ?? new Date(), timezone);
+  const entryLocalDate = isoDateDaysFrom(input.targetDate, -1);
+
+  if (local.date < entryLocalDate) {
+    return {
+      shouldEnter: false,
+      status: "before_entry_window",
+      timezone,
+      entryLocalDate,
+      localDate: local.date,
+      localTime: local.time,
+      minutesAfterLocalMidnight: local.minutesAfterMidnight,
+      entryStartMinutes,
+      entryEndMinutes,
+      reason: `Market-local date is ${local.date}, before the ${entryLocalDate} day-ahead entry date.`
+    };
+  }
+
+  if (local.date > input.targetDate) {
+    return {
+      shouldEnter: false,
+      status: "after_market_day",
+      timezone,
+      entryLocalDate,
+      localDate: local.date,
+      localTime: local.time,
+      minutesAfterLocalMidnight: local.minutesAfterMidnight,
+      entryStartMinutes,
+      entryEndMinutes,
+      reason: `Market-local date is ${local.date}, after target date ${input.targetDate}.`
+    };
+  }
+
+  if (local.date === input.targetDate) {
+    return {
+      shouldEnter: false,
+      status: "market_day_started",
+      timezone,
+      entryLocalDate,
+      localDate: local.date,
+      localTime: local.time,
+      minutesAfterLocalMidnight: local.minutesAfterMidnight,
+      entryStartMinutes,
+      entryEndMinutes,
+      reason: `Market-local target date ${input.targetDate} has already started; hold cash for a true day-ahead entry.`
+    };
+  }
+
+  if (local.minutesAfterMidnight < entryStartMinutes) {
+    return {
+      shouldEnter: false,
+      status: "before_entry_window",
+      timezone,
+      entryLocalDate,
+      localDate: local.date,
+      localTime: local.time,
+      minutesAfterLocalMidnight: local.minutesAfterMidnight,
+      entryStartMinutes,
+      entryEndMinutes,
+      reason: `Market-local time ${local.time} is before the day-ahead entry window.`
+    };
+  }
+
+  if (local.minutesAfterMidnight > entryEndMinutes) {
+    return {
+      shouldEnter: false,
+      status: "after_entry_window",
+      timezone,
+      entryLocalDate,
+      localDate: local.date,
+      localTime: local.time,
+      minutesAfterLocalMidnight: local.minutesAfterMidnight,
+      entryStartMinutes,
+      entryEndMinutes,
+      reason: `Market-local time ${local.time} is after the day-ahead entry window.`
+    };
+  }
+
+  return {
+    shouldEnter: true,
+    status: "inside_entry_window",
+    timezone,
+    entryLocalDate,
+    localDate: local.date,
+    localTime: local.time,
+    minutesAfterLocalMidnight: local.minutesAfterMidnight,
+    entryStartMinutes,
+    entryEndMinutes,
+    reason: `Market-local time ${local.time} is inside the day-ahead entry window for target date ${input.targetDate}.`
   };
 }
