@@ -281,6 +281,7 @@ export interface CollectWeatherForecastSnapshotsOptions {
 }
 
 export interface CollectWeatherPreviousRunForecastsOptions {
+  marketSnapshotCapturedAt?: string;
   startDate: string;
   endDate: string;
   cities?: string[];
@@ -1547,11 +1548,13 @@ function addDaysIso(value: string, days: number): string {
   return date.toISOString().slice(0, 10);
 }
 
-async function latestMarketSnapshotGroups(config: AppConfig): Promise<WeatherMarketGroup[]> {
+async function latestMarketSnapshotGroups(config: AppConfig, capturedAt?: string): Promise<WeatherMarketGroup[]> {
   const records = await readJsonlRecords<WeatherMarketSnapshotRecord>(config.weather.datasets.marketSnapshotsPath);
-  const latest = maxString(records.map((record) => record.capturedAt));
+  const latest = capturedAt ?? maxString(records.map((record) => record.capturedAt));
   if (!latest) throw new Error(`No market snapshots found at ${config.weather.datasets.marketSnapshotsPath}.`);
-  return marketSnapshotGroups(records.filter((record) => record.capturedAt === latest));
+  const selected = records.filter((record) => record.capturedAt === latest);
+  if (selected.length === 0) throw new Error(`No market snapshots found for capturedAt ${latest}.`);
+  return marketSnapshotGroups(selected);
 }
 
 async function previousRunForecastTargets(
@@ -1580,7 +1583,7 @@ async function previousRunForecastTargets(
   }
 
   const targets = new Map<string, PreviousRunForecastTarget>();
-  for (const group of await latestMarketSnapshotGroups(config)) {
+  for (const group of await latestMarketSnapshotGroups(config, options.marketSnapshotCapturedAt)) {
     const countryCode = options.countryCodes?.[group.city] ?? DEFAULT_WEATHER_MARKET_COUNTRY_CODES[group.city];
     try {
       const forecastTarget = await resolvePricingForecastTarget(config, group, { countryCode });

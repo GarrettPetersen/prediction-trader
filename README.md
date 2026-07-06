@@ -644,6 +644,7 @@ Collect historical day-ahead forecasts for dates that have already happened:
 
 ```bash
 npm run weather:dataset:previous-runs -- \
+  --market-captured-at 2026-07-05T04:55:43.151Z \
   --start-date 2024-01-01 \
   --end-date 2024-12-31 \
   --lead-days 1 \
@@ -656,9 +657,11 @@ resolves each market group to the same settlement station/feed used by live
 pricing, and stores rows keyed by a stable forecast target such as
 `station:KATL` or `station:EHAM`. Each row also records the display city,
 station id/name, and city-to-station distance so backtests can prove they are
-calibrating against the same target they would trade. Passing `--cities`
-explicitly is still supported for research, but those rows are keyed as
-`city:...` and should not be mixed with production station-target backtests.
+calibrating against the same target they would trade. Pass
+`--market-captured-at` to backfill forecasts for an older saved market snapshot
+instead of the latest one. Passing `--cities` explicitly is still supported for
+research, but those rows are keyed as `city:...` and should not be mixed with
+production station-target backtests.
 For each target/date/source/lead time it stores the forecast value that the
 model predicted before valid time, such as `leadDays=1` for the value predicted
 roughly 24 hours earlier.

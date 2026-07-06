@@ -68,6 +68,21 @@ describe("weather resolution actual helpers", () => {
     assert.ok(actual.minTempC !== undefined && actual.minTempC > 24.3 && actual.minTempC < 24.5);
   });
 
+  it("rejects Weather.com zero-zero daily summaries when they are sentinel missing values", () => {
+    const actual = parseWeatherComHistoricalDailyActualFromJson(JSON.stringify({
+      observations: [
+        { key: "MMMX", max_temp: 0, min_temp: 0 }
+      ]
+    }), {
+      stationId: "MMMX",
+      date: "2026-07-04",
+      url: "https://api.weather.com/v1/location/MMMX:9:MX/observations/historical.json",
+      fetchedAt: "2026-07-05T00:00:00.000Z"
+    });
+
+    assert.equal(actual.ok, false);
+  });
+
   it("parses daily high and low from Wunderground-like JSON payloads", () => {
     const html = `
       <html>

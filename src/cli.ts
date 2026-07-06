@@ -1087,7 +1087,7 @@ Commands:
   weather:dataset:observations (--city CITY [--country CODE] | --latitude N --longitude N) --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--ncei-station ID | --ncei-location ID] [--path PATH]
   weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--path PATH]
   weather:dataset:forecasts [--market-captured-at ISO] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko] [--max-cities N] [--path PATH]
-  weather:dataset:previous-runs --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--cities CITY[,CITY...]] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--lead-days 1,2,3] [--max-cities N] [--path PATH]
+  weather:dataset:previous-runs --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--market-captured-at ISO] [--cities CITY[,CITY...]] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--lead-days 1,2,3] [--max-cities N] [--path PATH]
   weather:dataset:resolution-actuals [--market-captured-at ISO] [--date YYYY-MM-DD] [--metar-hours N] [--max-groups N] [--no-wunderground] [--path PATH]
   weather:dataset:run [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--no-climatology] [--path PATH]
   weather:dataset:summary
@@ -1591,6 +1591,7 @@ async function run(): Promise<void> {
 
   if (command === "weather:dataset:previous-runs") {
     const result = await collectWeatherPreviousRunForecastsDataset(config, {
+      marketSnapshotCapturedAt: stringArg(args, "market-captured-at", false),
       startDate: requiredStringArg(args, "start-date"),
       endDate: requiredStringArg(args, "end-date"),
       cities: listArg(args, "cities", false),

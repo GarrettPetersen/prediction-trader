@@ -427,6 +427,10 @@ export function parseWeatherComHistoricalDailyActualFromJson(
   const observedMaxF = observedTempsF.length > 0 ? Math.max(...observedTempsF) : undefined;
   const observedMinF = observedTempsF.length > 0 ? Math.min(...observedTempsF) : undefined;
   const explicitPair = explicitPairs
+    .filter((pair) => {
+      if (pair.high !== 0 || pair.low !== 0) return true;
+      return observedTempsF.some((temp) => Math.abs(temp) < 0.1);
+    })
     .map((pair) => {
       const range = pair.high - pair.low;
       let score = 0;
