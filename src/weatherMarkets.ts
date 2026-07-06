@@ -1,6 +1,7 @@
 import type { AppConfig } from "./config.js";
 import { fahrenheitToCelsius } from "./weatherEdge.js";
 import { parseGammaList } from "./marketplaces/polymarketData.js";
+import { resolutionSourceFromText } from "./weatherStations.js";
 
 const POLYMARKET_GAMMA_BASE_URL = "https://gamma-api.polymarket.com";
 const MONTHS: Record<string, number> = {
@@ -51,6 +52,7 @@ export interface WeatherMarketCandidate {
   eventEndDate?: string;
   marketSlug: string;
   question: string;
+  description?: string;
   resolutionSource?: string;
   conditionId?: string;
   active: boolean;
@@ -247,6 +249,7 @@ function normalizeWeatherMarketCandidate(
   const eventSlug = stringValue(event.slug) ?? "";
   const eventTitle = stringValue(event.title) ?? "";
   const eventEndDate = stringValue(event.endDate);
+  const description = stringValue(market.description) ?? stringValue(event.description);
 
   if (!question || !marketSlug) {
     return { unparsed: { slug: marketSlug, question, reason: "missing question or slug" } };
@@ -267,7 +270,8 @@ function normalizeWeatherMarketCandidate(
     eventEndDate,
     marketSlug,
     question,
-    resolutionSource: stringValue(market.resolutionSource),
+    description,
+    resolutionSource: stringValue(market.resolutionSource) ?? resolutionSourceFromText(description),
     conditionId: stringValue(market.conditionId),
     active: boolValue(market.active),
     closed: boolValue(market.closed),

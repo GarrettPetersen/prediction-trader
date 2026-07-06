@@ -24,6 +24,7 @@ import {
   type WeatherEdgeReportOptions
 } from "./weatherEdges.js";
 import { parseWeatherMarketQuestion } from "./weatherMarkets.js";
+import { resolutionSourceFromText } from "./weatherStations.js";
 
 export type WeatherReinvestConfidence = "LOW" | "MEDIUM" | "HIGH";
 
@@ -124,6 +125,7 @@ interface VistadexMarketReference {
   slug: string;
   question?: string;
   conditionId: string;
+  description?: string;
   resolutionSource?: string;
 }
 
@@ -410,6 +412,12 @@ async function loadVistadexEventMarkets(
   eventSlug: string
 ): Promise<Map<string, VistadexMarketReference>> {
   const event = await getVistadexEvent(config, eventSlug);
+  const eventRecord = (event as { event?: unknown }).event;
+  const eventDescription = eventRecord && typeof eventRecord === "object"
+    ? typeof (eventRecord as Record<string, unknown>).description === "string"
+      ? (eventRecord as Record<string, unknown>).description as string
+      : undefined
+    : undefined;
   const markets = Array.isArray((event as { markets?: unknown }).markets)
     ? (event as { markets: unknown[] }).markets
     : [];
@@ -426,11 +434,17 @@ async function loadVistadexEventMarkets(
         ? metadata.condition_id
         : undefined;
     if (!slug || !conditionId) continue;
+    const description = typeof metadata.description === "string"
+      ? metadata.description
+      : eventDescription;
     refs.set(slug, {
       slug,
       conditionId,
       question: typeof metadata.question === "string" ? metadata.question : undefined,
-      resolutionSource: typeof metadata.resolution_source === "string" ? metadata.resolution_source : undefined
+      description,
+      resolutionSource: typeof metadata.resolution_source === "string"
+        ? metadata.resolution_source
+        : resolutionSourceFromText(description)
     });
   }
   return refs;

@@ -3,7 +3,7 @@ import type { WeatherMarketGroup } from "./weatherMarkets.js";
 
 export interface ParsedResolutionSource {
   raw?: string;
-  provider: "wunderground" | "missing" | "unknown";
+  provider: "wunderground" | "noaa_timeseries" | "hko" | "missing" | "unknown";
   stationId?: string;
   locationPath?: string;
   note?: string;
@@ -43,6 +43,14 @@ interface AviationWeatherStationRaw {
 }
 
 const stationCache = new Map<string, Promise<WeatherStationInfo | undefined>>();
+
+export const HONG_KONG_OBSERVATORY_STATION: WeatherStationInfo = {
+  id: "HKO",
+  site: "Hong Kong Observatory",
+  latitude: 22.3027,
+  longitude: 114.1772,
+  country: "HK"
+};
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -91,6 +99,30 @@ export function parseResolutionSource(source: string | undefined): ParsedResolut
     };
   }
 
+  if (/weather\.gov$/i.test(url.hostname) && url.pathname.toLowerCase() === "/wrh/timeseries") {
+    const stationId = url.searchParams.get("site")?.trim().toUpperCase();
+    if (!stationId) {
+      return {
+        raw: source,
+        provider: "noaa_timeseries",
+        note: "NOAA timeseries URL did not include a station site."
+      };
+    }
+    return {
+      raw: source,
+      provider: "noaa_timeseries",
+      stationId
+    };
+  }
+
+  if (/weather\.gov\.hk$/i.test(url.hostname) || /\.weather\.gov\.hk$/i.test(url.hostname)) {
+    return {
+      raw: source,
+      provider: "hko",
+      stationId: HONG_KONG_OBSERVATORY_STATION.id
+    };
+  }
+
   if (!/wunderground\.com$/i.test(url.hostname) && !/\.wunderground\.com$/i.test(url.hostname)) {
     return {
       raw: source,
@@ -118,8 +150,31 @@ export function parseResolutionSource(source: string | undefined): ParsedResolut
   };
 }
 
+export function resolutionSourceFromText(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+
+  const wunderground = text.match(/https?:\/\/(?:www\.)?wunderground\.com\/history\/daily\/[^\s"'<>)]*/i);
+  if (wunderground) return wunderground[0];
+
+  const noaa = text.match(/https?:\/\/www\.weather\.gov\/wrh\/timeseries\?site=([a-z0-9]+)/i);
+  if (noaa) {
+    const url = new URL(noaa[0]);
+    url.searchParams.set("site", (url.searchParams.get("site") ?? "").toUpperCase());
+    return url.toString();
+  }
+
+  const hko = text.match(/https?:\/\/(?:www\.)?weather\.gov\.hk\/[^\s"'<>)]*/i);
+  if (hko) return hko[0];
+
+  return undefined;
+}
+
 export function firstResolutionSource(group: WeatherMarketGroup): string | undefined {
-  return group.markets.find((market) => market.resolutionSource)?.resolutionSource;
+  for (const market of group.markets) {
+    const source = market.resolutionSource ?? resolutionSourceFromText(market.description);
+    if (source) return source;
+  }
+  return undefined;
 }
 
 export function distanceKm(
@@ -190,7 +245,23 @@ export async function resolveStationForecastTarget(
 ): Promise<WeatherStationForecastTarget> {
   const resolutionSource = firstResolutionSource(group);
   const resolution = parseResolutionSource(resolutionSource);
-  if (resolution.provider !== "wunderground" || !resolution.stationId) {
+  if (resolution.provider === "hko") {
+    return {
+      resolutionSource,
+      resolution,
+      station: HONG_KONG_OBSERVATORY_STATION,
+      location: stationWeatherLocation(HONG_KONG_OBSERVATORY_STATION, {
+        marketCity: group.city,
+        timezone: "Asia/Hong_Kong"
+      }),
+      matched: true
+    };
+  }
+
+  if (
+    (resolution.provider !== "wunderground" && resolution.provider !== "noaa_timeseries") ||
+    !resolution.stationId
+  ) {
     return {
       resolutionSource,
       resolution,

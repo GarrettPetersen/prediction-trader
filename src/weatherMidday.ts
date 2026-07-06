@@ -27,6 +27,8 @@ import {
 } from "./weatherResolutionData.js";
 import {
   distanceKm,
+  HONG_KONG_OBSERVATORY_STATION,
+  resolutionSourceFromText,
   resolveStationForecastTarget,
   type WeatherStationForecastTarget,
   type WeatherStationInfo
@@ -46,14 +48,6 @@ const MIDDAY_SOURCE_WEIGHTS: Partial<Record<WeatherSourceId, number>> = {
   openmeteo_ukmo: 0.2,
   nws: 0.2,
   hko: 0.35
-};
-
-const HONG_KONG_OBSERVATORY_STATION: WeatherStationInfo = {
-  id: "HKO",
-  site: "Hong Kong Observatory",
-  latitude: 22.3027,
-  longitude: 114.1772,
-  country: "HK"
 };
 
 export interface AviationMetarObservation {
@@ -394,7 +388,8 @@ function looksLikeHkoSettlementGroup(group: WeatherMarketGroup): boolean {
   return looksLikeHkoText(group.eventTitle) ||
     group.markets.some((market) =>
       looksLikeHkoText(market.resolutionSource) ||
-      looksLikeHkoText(market.question)
+      looksLikeHkoText(market.question) ||
+      looksLikeHkoText(market.description)
     );
 }
 
@@ -881,13 +876,15 @@ export function vistadexEventToWeatherGroups(raw: unknown): WeatherMarketGroup[]
         outcome,
         price: outcomePrices[index]
       }));
+    const description = stringValue(metadata.description) ?? stringValue(event.description);
     const candidate: WeatherMarketCandidate = {
       eventSlug,
       eventTitle,
       eventEndDate: candidateEndDate,
       marketSlug,
       question,
-      resolutionSource: stringValue(metadata.resolution_source),
+      description,
+      resolutionSource: stringValue(metadata.resolution_source) ?? resolutionSourceFromText(description),
       conditionId,
       active: boolValue(metadata.active),
       closed: boolValue(metadata.closed),

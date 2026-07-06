@@ -10,6 +10,7 @@ import { parseWeatherMarketQuestion, type ParsedWeatherMarket, type WeatherMeasu
 import { probabilityInRange } from "./weatherPricing.js";
 import {
   parseResolutionSource,
+  resolutionSourceFromText,
   weatherCityTargetKey,
   weatherStationTargetKey
 } from "./weatherStations.js";
@@ -137,6 +138,7 @@ interface ClosedWeatherMarket {
   eventEndDate?: string;
   marketSlug: string;
   question: string;
+  description?: string;
   parsed: ParsedWeatherMarket;
   yesTokenId?: string;
   resolutionSource?: string;
@@ -246,7 +248,8 @@ function targetForClosedMarket(market: ClosedWeatherMarket): { targetKey: string
   const stationId = resolution.stationId ?? (
     looksLikeHkoText(market.resolutionSource) ||
       looksLikeHkoText(market.question) ||
-      looksLikeHkoText(market.eventTitle)
+      looksLikeHkoText(market.eventTitle) ||
+      looksLikeHkoText(market.description)
       ? "HKO"
       : undefined
   );
@@ -394,9 +397,11 @@ async function fetchClosedWeatherMarkets(date: string, options: { limit: number;
           eventEndDate,
           marketSlug,
           question,
+          description: stringValue(marketRaw.description) ?? stringValue(eventRaw.description),
           parsed,
           yesTokenId: yesIndex >= 0 ? tokenIds[yesIndex] : undefined,
-          resolutionSource: stringValue(marketRaw.resolutionSource),
+          resolutionSource: stringValue(marketRaw.resolutionSource) ??
+            resolutionSourceFromText(stringValue(marketRaw.description) ?? stringValue(eventRaw.description)),
           resolvedYes: parseResolvedYes(marketRaw.outcomes, marketRaw.outcomePrices)
         });
       }

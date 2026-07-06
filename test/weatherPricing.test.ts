@@ -71,4 +71,48 @@ describe("weather pricing math", () => {
     assert.equal(target.resolutionTarget.station?.id, "HKO");
     assert.equal(target.resolutionTarget.forecastLocation.countryCode, "HK");
   });
+
+  it("uses HKO when Gamma exposes the source only in the description", async () => {
+    const group: WeatherMarketGroup = {
+      eventSlug: "highest-temperature-in-hong-kong-on-july-7-2026",
+      eventTitle: "Highest temperature in Hong Kong on July 7?",
+      eventEndDate: "2026-07-07T12:00:00Z",
+      city: "Hong Kong",
+      date: "2026-07-07",
+      measure: "temperature_high",
+      markets: [{
+        eventSlug: "highest-temperature-in-hong-kong-on-july-7-2026",
+        eventTitle: "Highest temperature in Hong Kong on July 7?",
+        eventEndDate: "2026-07-07T12:00:00Z",
+        marketSlug: "highest-temperature-in-hong-kong-on-july-7-2026-31c",
+        question: "Will the highest temperature in Hong Kong be 31°C on July 7?",
+        description: "The resolution source for this market will be information from the Hong Kong Observatory, specifically the \"Absolute Daily Max (deg. C)\" once information is finalized in the relevant \"Daily Extract\", available here: https://www.weather.gov.hk/en/cis/climat.htm",
+        active: true,
+        closed: false,
+        outcomes: [],
+        parsed: {
+          city: "Hong Kong",
+          date: "2026-07-07",
+          measure: "temperature_high",
+          outcome: {
+            kind: "exact",
+            label: "31C",
+            unit: "C",
+            lowerTempC: 30.5,
+            upperTempC: 31.5,
+            exactTempC: 31,
+            rawValue: 31
+          }
+        }
+      }],
+      unparsed: []
+    };
+
+    const target = await resolvePricingForecastTarget({} as AppConfig, group, {});
+
+    assert.equal(target.strictError, undefined);
+    assert.equal(target.resolutionTarget.matched, true);
+    assert.equal(target.resolutionTarget.station?.id, "HKO");
+    assert.equal(target.resolutionTarget.resolutionSource, "https://www.weather.gov.hk/en/cis/climat.htm");
+  });
 });

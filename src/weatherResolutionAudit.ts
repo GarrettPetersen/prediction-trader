@@ -7,6 +7,7 @@ import {
   distanceKm,
   fetchWeatherStationInfo,
   firstResolutionSource,
+  HONG_KONG_OBSERVATORY_STATION,
   parseResolutionSource,
   type ParsedResolutionSource,
   type WeatherStationInfo
@@ -92,7 +93,13 @@ function auditStatus(
   options: { okKm: number; warnKm: number }
 ): WeatherResolutionAuditStatus {
   if (resolution.provider === "missing") return "MISSING_RESOLUTION_SOURCE";
-  if (resolution.provider !== "wunderground") return "UNSUPPORTED_RESOLUTION_SOURCE";
+  if (
+    resolution.provider !== "wunderground" &&
+    resolution.provider !== "noaa_timeseries" &&
+    resolution.provider !== "hko"
+  ) {
+    return "UNSUPPORTED_RESOLUTION_SOURCE";
+  }
   if (!station) return "STATION_COORDS_MISSING";
   if (distance === undefined || distance <= options.okKm) return "MATCHES_STATION";
   if (distance <= options.warnKm) return "NEAR_STATION";
@@ -145,7 +152,9 @@ export async function auditWeatherResolutionSources(
   const rows = await mapWithConcurrency(targetGroups, 8, async (group) => {
     const resolutionSource = firstResolutionSource(group);
     const resolution = parseResolutionSource(resolutionSource);
-    const station = resolution.stationId
+    const station = resolution.provider === "hko"
+      ? HONG_KONG_OBSERVATORY_STATION
+      : resolution.stationId
       ? await (stationCache.get(resolution.stationId) ?? (() => {
         const request = fetchWeatherStationInfo(resolution.stationId as string);
         stationCache.set(resolution.stationId as string, request);

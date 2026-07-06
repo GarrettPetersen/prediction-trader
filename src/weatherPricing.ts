@@ -16,6 +16,7 @@ import {
 } from "./weatherEdge.js";
 import {
   distanceKm,
+  HONG_KONG_OBSERVATORY_STATION,
   resolveStationForecastTarget,
   type ParsedResolutionSource,
   type WeatherStationForecastTarget,
@@ -135,14 +136,6 @@ const DAY_AHEAD_SOURCES: WeatherSourceId[] = [
   "nws",
   "hko"
 ];
-
-const HONG_KONG_OBSERVATORY_STATION: WeatherStationInfo = {
-  id: "HKO",
-  site: "Hong Kong Observatory",
-  latitude: 22.3027,
-  longitude: 114.1772,
-  country: "HK"
-};
 
 function mean(values: number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -359,7 +352,8 @@ function looksLikeHkoSettlementGroup(group: WeatherMarketGroup): boolean {
   return looksLikeHkoText(group.eventTitle) ||
     group.markets.some((market) =>
       looksLikeHkoText(market.resolutionSource) ||
-      looksLikeHkoText(market.question)
+      looksLikeHkoText(market.question) ||
+      looksLikeHkoText(market.description)
     );
 }
 
