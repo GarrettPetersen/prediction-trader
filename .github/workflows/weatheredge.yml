@@ -39,6 +39,8 @@ jobs:
       WEATHEREDGE_SKIP_CALIBRATION: ${{ vars.WEATHEREDGE_SKIP_CALIBRATION || '0' }}
       WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS: ${{ vars.WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS }}
       WEATHEREDGE_CITY_BIAS_PRIOR_WEIGHT: ${{ vars.WEATHEREDGE_CITY_BIAS_PRIOR_WEIGHT }}
+      WEATHEREDGE_DATA_RELEASE_TAG: ${{ vars.WEATHEREDGE_DATA_RELEASE_TAG || 'weatheredge-calibration-data' }}
+      WEATHEREDGE_DATA_ASSET: ${{ vars.WEATHEREDGE_DATA_ASSET || 'weatheredge-data.tar.gz' }}
       WEATHEREDGE_SHOULD_EXECUTE: ${{ github.event_name == 'schedule' || inputs.execute == 'true' }}
       PREDICTION_TRADER_LIVE: ${{ vars.WEATHEREDGE_LIVE || '0' }}
       PREDICTION_TRADER_MAX_USD: ${{ vars.PREDICTION_TRADER_MAX_USD || vars.WEATHEREDGE_MAX_PER_TRADE || '10' }}
@@ -71,6 +73,43 @@ jobs:
           key: weatheredge-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
             weatheredge-${{ runner.os }}-
+
+      - name: Restore WeatherEdge calibration datasets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REQUIRED_DATASETS="
+          data/weather/forecasts/openmeteo-previous-runs.jsonl
+          data/weather/observations/noaa-ghcnd-daily.jsonl
+          data/weather/resolution/weather-resolution-actuals.jsonl
+          "
+
+          missing=0
+          for path in ${REQUIRED_DATASETS}; do
+            if [ ! -s "${path}" ]; then
+              missing=1
+            fi
+          done
+
+          if [ "${missing}" = "0" ]; then
+            echo "WeatherEdge calibration datasets restored from cache."
+            exit 0
+          fi
+
+          echo "WeatherEdge calibration datasets missing from cache; downloading ${WEATHEREDGE_DATA_ASSET} from release ${WEATHEREDGE_DATA_RELEASE_TAG}."
+          mkdir -p /tmp/weatheredge-data
+          gh release download "${WEATHEREDGE_DATA_RELEASE_TAG}" \
+            --pattern "${WEATHEREDGE_DATA_ASSET}" \
+            --dir /tmp/weatheredge-data \
+            --clobber
+          tar -xzf "/tmp/weatheredge-data/${WEATHEREDGE_DATA_ASSET}"
+
+          for path in ${REQUIRED_DATASETS}; do
+            if [ ! -s "${path}" ]; then
+              echo "Required calibration dataset is still missing after restore: ${path}"
+              exit 1
+            fi
+          done
 
       - name: Install dependencies
         run: npm ci
