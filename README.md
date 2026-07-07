@@ -189,7 +189,7 @@ API key is configured.
 ## WeatherEdge Sources
 
 RainBot says its weather engine uses GFS, ECMWF, UKMO, NWS, HKO for Hong Kong,
-and NOAA NCEI GHCND history for climatology. This repo's first WeatherEdge
+and NOAA NCEI GHCND history for climatology. This repo's WeatherEdge source
 layer connects to those source families through public/user-accessible APIs:
 
 - `openmeteo_gfs`: Open-Meteo model `gfs_seamless`.
@@ -203,6 +203,15 @@ layer connects to those source families through public/user-accessible APIs:
   `NOAA_CDO_TOKEN`. By default, the command auto-selects a nearby GHCND station
   with `TMAX` coverage; use `--ncei-location` or `--ncei-station` to force a
   known CDO id.
+
+Production day-ahead pricing is calibrated by default. It uses current
+Open-Meteo GFS/ECMWF/UKMO forecasts, then applies source bias, station/city
+bias, and fitted sigma learned from `WEATHER_PREVIOUS_RUN_FORECASTS_PATH`,
+`WEATHER_OBSERVATIONS_PATH`, and `WEATHER_RESOLUTION_ACTUALS_PATH`. NWS and HKO
+remain useful source integrations and diagnostics, but they are not part of the
+default live day-ahead trading consensus until we have comparable historical
+calibration data for them. Pass `--no-calibration` only for diagnostics; the
+uncalibrated path is not the production strategy.
 
 WeatherEdge research notes:
 
@@ -297,10 +306,12 @@ The RainBot-style pipeline is CLI-first and review-first:
 
 1. Discover Polymarket weather events.
 2. Parse city, date, market type, and temperature outcome bins.
-3. Resolve the market's settlement feed/station, then pull GFS, ECMWF, UKMO,
-   NWS/HKO where applicable for that target, plus NOAA NCEI history.
-4. Build a weighted consensus forecast.
-5. Blend in a 10-year same-calendar-date NOAA prior when available.
+3. Resolve the market's settlement feed/station, then pull current GFS, ECMWF,
+   and UKMO forecasts for that exact target.
+4. Apply historical previous-run calibration: source-specific residual bias,
+   station/city residual bias with shrinkage, and fitted error sigma.
+5. Refuse to emit production signals when calibrated forecast/actual datasets
+   are missing for the target family. No silent city or climatology fallback.
 6. Price each outcome with a Normal CDF.
 7. Compare fair probability to market prices, apply a dynamic edge threshold,
    and size with fractional Kelly. Defaults are quarter-Kelly
@@ -494,6 +505,14 @@ freed outside that window is held until a later scheduled run. The loop does
 not touch Polymarket. Add `--execute` only after `PREDICTION_TRADER_LIVE=1` is
 set and the dry-run report looks sane.
 
+Live WeatherEdge pricing uses calibrated previous-run residuals by default.
+Every buy row in `weatheredge-report.json` includes `modelMode`,
+`calibrationTargetKey`, calibration sample count, bias terms, consensus mean,
+and sigma. If the calibration datasets are missing or stale enough that no
+calibrated forecast can be built, the row is skipped rather than falling back
+to an uncalibrated climatology blend. Use `--no-calibration` only when you are
+intentionally inspecting the old heuristic model.
+
 After selling locked weather positions, the loop skips the WeatherEdge
 market/forecast scan when deployable cash is below `--min-cash-to-reinvest`
 defaulting to `$5`. Deployable cash is current Vistadex USDC cash after
@@ -519,8 +538,10 @@ VISTADEX_SECRET_KEY
 NOAA_CDO_TOKEN
 ```
 
-`NOAA_CDO_TOKEN` is optional but recommended. Without it, live pricing skips
-the climatology prior and relies on forecast models only.
+`NOAA_CDO_TOKEN` is optional for the scheduled trader, but recommended for
+dataset collection and source audits. Calibrated live pricing depends on saved
+previous-run forecast and actual datasets, not on a same-day NOAA climatology
+fallback.
 
 Configure repository variables:
 
@@ -539,6 +560,9 @@ WEATHEREDGE_TARGET_CASH_RESERVE=20
 WEATHEREDGE_ENTRY_START_LOCAL_TIME=20:00
 WEATHEREDGE_ENTRY_END_LOCAL_TIME=23:30
 WEATHEREDGE_SKIP_CLIMATOLOGY=0
+WEATHEREDGE_SKIP_CALIBRATION=0
+WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS=
+WEATHEREDGE_CITY_BIAS_PRIOR_WEIGHT=
 PREDICTION_TRADER_MAX_USD=10
 NWS_USER_AGENT=prediction-trader/0.1 weatheredge github-actions
 ```
@@ -553,19 +577,19 @@ resolution station's own timezone: every three-hour run may sell locked
 positions, but it opens fresh day-ahead positions only when the station-local
 clock is inside `WEATHEREDGE_ENTRY_START_LOCAL_TIME` through
 `WEATHEREDGE_ENTRY_END_LOCAL_TIME` on the day before the target date. It
-restores and saves `.cache/weatheredge` with `actions/cache` so NOAA
-station/data responses and similar implementation caches survive between runs.
-It also uploads `data/trades/ledger.jsonl` and
+restores and saves `.cache/weatheredge` and `data/weather` with `actions/cache`
+so calibration datasets and implementation caches survive between runs once
+seeded. It also uploads `data/trades/ledger.jsonl` and
 `data/trades/weatheredge-report.json` as run artifacts.
 
-The ignored `data/weather/**/*.jsonl` datasets are not required for this live
-loop to start. The live loop fetches current market pages, current forecasts,
-and current Vistadex state on every run. Those ignored datasets are for
-backtesting, calibration research, settlement-source audits, and later PnL
-analysis. GitHub Actions artifacts/cache are convenient but not a durable
-database; if this becomes production, move the ledger, price snapshots,
-forecasts, and settlement actuals into durable storage such as Cloudflare D1,
-R2, S3, Postgres, or a private database service.
+The ignored `data/weather/**/*.jsonl` datasets are required for calibrated live
+buy signals. If they are absent in GitHub Actions, `weather:reinvest` can still
+sell locked positions, but it should skip new buys because no calibrated
+forecast can be built. Seed `data/weather` before relying on scheduled live
+trading, and treat GitHub Actions cache/artifacts as convenience storage only.
+If this becomes production, move the ledger, price snapshots, forecasts,
+previous-run calibration data, and settlement actuals into durable storage such
+as Cloudflare D1, R2, S3, Postgres, or a private database service.
 
 Recommended rollout:
 
@@ -707,6 +731,26 @@ npm run weather:backtest:markets -- \
   --city-bias-prior-weight 30
 ```
 
+To backtest the scheduled GitHub Actions entry cadence rather than a clean
+`eventEnd - 24h` timestamp, use cron-entry mode:
+
+```bash
+npm run weather:backtest:markets -- \
+  --date 2026-06-30 \
+  --lead-days 1 \
+  --bankroll 100 \
+  --min-edge 0.20 \
+  --sizing city-portfolio \
+  --max-group-fraction 0.25 \
+  --entry-mode cron-entry-window \
+  --entry-start-local-time 20:00 \
+  --entry-end-local-time 23:30 \
+  --cron-interval-hours 3 \
+  --cron-minute 17 \
+  --fill-slippage 0.02 \
+  --min-executable-edge 0.03
+```
+
 That command fetches resolved Polymarket weather binaries for the date, resolves
 each market to its settlement forecast target, joins historical price just
 before the decision time to matching station-keyed Open-Meteo previous-run
@@ -726,11 +770,16 @@ controls the optimizer's dollar granularity. Keep
 Settlement-source actuals from `weather:dataset:resolution-actuals` are used for
 station-keyed calibration when available; NOAA actuals remain useful diagnostics
 for older city-keyed research rows, but they are not used as a proxy for market
-settlement. The backtest still assumes fills at historical YES prices, infers NO
-prices as `1 - YES`, and does not yet model order-book depth, spread, fees, or
-liquidity caps. Use `--min-trade-price` to exclude very cheap contracts while we
-are still using last-trade/price-history fills instead of full order-book
-simulation.
+settlement. In default entry mode, the backtest prices at
+`eventEnd - leadDays`. In `--entry-mode cron-entry-window`, it requires stored
+target timezone metadata and uses the first UTC cron tick inside the
+station-local evening entry window, matching the scheduled trader more closely.
+`--fill-slippage` adds an adverse price penalty to both YES and synthetic NO
+fills, and `--min-executable-edge` requires edge to survive that penalty. The
+backtest still infers NO prices as `1 - YES` before slippage and does not yet
+model full order-book depth, fees, or liquidity caps. Use `--min-trade-price`
+to exclude very cheap contracts while we are still using price-history fills
+instead of full order-book simulation.
 
 The market backtest calibrates the forecast before pricing bins:
 

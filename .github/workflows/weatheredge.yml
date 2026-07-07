@@ -36,6 +36,9 @@ jobs:
       WEATHEREDGE_ENTRY_START_LOCAL_TIME: ${{ vars.WEATHEREDGE_ENTRY_START_LOCAL_TIME || '20:00' }}
       WEATHEREDGE_ENTRY_END_LOCAL_TIME: ${{ vars.WEATHEREDGE_ENTRY_END_LOCAL_TIME || '23:30' }}
       WEATHEREDGE_SKIP_CLIMATOLOGY: ${{ vars.WEATHEREDGE_SKIP_CLIMATOLOGY || '0' }}
+      WEATHEREDGE_SKIP_CALIBRATION: ${{ vars.WEATHEREDGE_SKIP_CALIBRATION || '0' }}
+      WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS: ${{ vars.WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS }}
+      WEATHEREDGE_CITY_BIAS_PRIOR_WEIGHT: ${{ vars.WEATHEREDGE_CITY_BIAS_PRIOR_WEIGHT }}
       WEATHEREDGE_SHOULD_EXECUTE: ${{ github.event_name == 'schedule' || inputs.execute == 'true' }}
       PREDICTION_TRADER_LIVE: ${{ vars.WEATHEREDGE_LIVE || '0' }}
       PREDICTION_TRADER_MAX_USD: ${{ vars.PREDICTION_TRADER_MAX_USD || vars.WEATHEREDGE_MAX_PER_TRADE || '10' }}
@@ -62,7 +65,9 @@ jobs:
       - name: Restore WeatherEdge cache
         uses: actions/cache@v4
         with:
-          path: .cache/weatheredge
+          path: |
+            .cache/weatheredge
+            data/weather
           key: weatheredge-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
             weatheredge-${{ runner.os }}-
@@ -90,6 +95,18 @@ jobs:
 
           if [ "${WEATHEREDGE_SKIP_CLIMATOLOGY}" = "1" ]; then
             ARGS="${ARGS} --no-climatology"
+          fi
+
+          if [ "${WEATHEREDGE_SKIP_CALIBRATION}" = "1" ]; then
+            ARGS="${ARGS} --no-calibration"
+          fi
+
+          if [ -n "${WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS}" ]; then
+            ARGS="${ARGS} --calibration-half-life-days ${WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS}"
+          fi
+
+          if [ -n "${WEATHEREDGE_CITY_BIAS_PRIOR_WEIGHT}" ]; then
+            ARGS="${ARGS} --city-bias-prior-weight ${WEATHEREDGE_CITY_BIAS_PRIOR_WEIGHT}"
           fi
 
           if [ "${WEATHEREDGE_LIVE}" = "1" ] && [ "${WEATHEREDGE_SHOULD_EXECUTE}" = "true" ]; then

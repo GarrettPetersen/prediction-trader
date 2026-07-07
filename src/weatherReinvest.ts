@@ -56,6 +56,9 @@ export interface WeatherReinvestOptions extends Pick<
   portfolioStepUsd?: number;
   minEdge?: number;
   skipClimatology?: boolean;
+  skipCalibration?: boolean;
+  calibrationHalfLifeDays?: number;
+  cityBiasPriorWeight?: number;
   sellBidThreshold?: number;
   sellMinPrice?: number;
   minSellShares?: number;
@@ -99,6 +102,14 @@ export interface WeatherReinvestTradeResult {
   fairPrice?: number;
   confidence?: WeatherReinvestConfidence;
   groupKey?: string;
+  modelMode?: WeatherEdgeRow["modelMode"];
+  calibrationTargetKey?: string;
+  calibrationSamples?: number;
+  calibrationBiasC?: number;
+  calibrationTargetBiasC?: number;
+  calibrationMeanAbsoluteErrorC?: number;
+  consensusMeanC?: number;
+  consensusSigmaC?: number;
   entryWindow?: WeatherEntryWindowAssessment;
 }
 
@@ -534,6 +545,14 @@ async function buyPositiveWeatherEdges(
       fairPrice,
       confidence: row.confidence,
       groupKey,
+      modelMode: row.modelMode,
+      calibrationTargetKey: row.calibrationTargetKey,
+      calibrationSamples: row.calibrationSamples,
+      calibrationBiasC: row.calibrationBiasC,
+      calibrationTargetBiasC: row.calibrationTargetBiasC,
+      calibrationMeanAbsoluteErrorC: row.calibrationMeanAbsoluteErrorC,
+      consensusMeanC: row.consensusMeanC,
+      consensusSigmaC: row.consensusSigmaC,
       entryWindow
     };
 
@@ -746,6 +765,9 @@ export async function runWeatherReinvestment(
       portfolioStepUsd: options.portfolioStepUsd ?? 0.5,
       minEdge: requireReinvestMinEdge(options.minEdge),
       skipClimatology: options.skipClimatology,
+      skipCalibration: options.skipCalibration,
+      calibrationHalfLifeDays: options.calibrationHalfLifeDays,
+      cityBiasPriorWeight: options.cityBiasPriorWeight,
       sizingStrategy: "city_portfolio"
     });
   const buyResult = edgeReport

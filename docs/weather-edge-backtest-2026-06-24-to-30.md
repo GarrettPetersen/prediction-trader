@@ -3,6 +3,12 @@
 This note records a seven-day, one-day-ahead backtest of the WeatherEdge
 temperature-market model after adding city-level portfolio optimization.
 
+Update: live WeatherEdge pricing now uses the same historical previous-run
+residual calibration machinery as the market backtest, and
+`weather:backtest:markets` can run in `--entry-mode cron-entry-window` with
+slippage and executable-edge penalties. Treat the results below as an older
+research snapshot, not proof that the scheduled live bot is positive EV.
+
 The short version: the model is interesting, but not proven positive EV yet.
 Independent Kelly sizing and uncapped city portfolio sizing were slightly
 negative over this sample. A city-capped portfolio variant was positive, but

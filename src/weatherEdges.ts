@@ -70,6 +70,12 @@ export interface WeatherEdgeRow {
   consensusMeanC?: number;
   consensusSigmaC?: number;
   modelStdDevC?: number;
+  modelMode?: "historical_residuals" | "heuristic";
+  calibrationTargetKey?: string;
+  calibrationSamples?: number;
+  calibrationBiasC?: number;
+  calibrationTargetBiasC?: number;
+  calibrationMeanAbsoluteErrorC?: number;
   agreement?: string;
   tradingWindow?: WeatherTradingWindowAssessment;
   reason: string;
@@ -164,6 +170,12 @@ export function buildWeatherEdgeRows(reports: WeatherPricingReport[]): WeatherEd
           consensusMeanC: report.consensus?.meanC,
           consensusSigmaC: report.consensus?.sigmaC,
           modelStdDevC: report.consensus?.modelStdDevC,
+          modelMode: report.consensus?.calibration?.mode ?? (report.consensus ? "heuristic" as const : undefined),
+          calibrationTargetKey: report.consensus?.calibration?.targetKey,
+          calibrationSamples: report.consensus?.calibration?.measureSamples,
+          calibrationBiasC: report.consensus?.calibration?.biasC,
+          calibrationTargetBiasC: report.consensus?.calibration?.targetBiasC,
+          calibrationMeanAbsoluteErrorC: report.consensus?.calibration?.meanAbsoluteErrorC,
           agreement: report.consensus?.agreement,
           tradingWindow: report.tradingWindow,
           reason: unsafeStartedDay

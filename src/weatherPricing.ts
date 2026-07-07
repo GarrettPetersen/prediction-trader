@@ -1,4 +1,10 @@
+import { readFile } from "node:fs/promises";
 import type { AppConfig } from "./config.js";
+import type {
+  WeatherObservationRecord,
+  WeatherPreviousRunForecastRecord,
+  WeatherResolutionActualRecord
+} from "./weatherDatasets.js";
 import type {
   WeatherMarketCandidate,
   WeatherMarketGroup,
@@ -18,6 +24,9 @@ import {
   distanceKm,
   HONG_KONG_OBSERVATORY_STATION,
   resolveStationForecastTarget,
+  weatherCityTargetKey,
+  weatherLocationTargetKey,
+  weatherStationTargetKey,
   type ParsedResolutionSource,
   type WeatherStationForecastTarget,
   type WeatherStationInfo
@@ -28,11 +37,24 @@ import {
   optimizeWeatherPortfolio,
   type WeatherPortfolioCandidate
 } from "./weatherPortfolioOptimizer.js";
+import {
+  DEFAULT_CALIBRATION_HALF_LIFE_DAYS,
+  DEFAULT_CITY_BIAS_PRIOR_WEIGHT,
+  aggregateCalibratedForecast,
+  buildPreviousRunForecastValueIndex,
+  buildWeatherActualIndex,
+  calibrateWeatherForecasts,
+  calibrationBiasForTarget,
+  type WeatherForecastCalibration,
+  type WeatherSourceForecastValue
+} from "./weatherCalibration.js";
 
 export interface WeatherForecastPoint {
   source: WeatherSourceId;
   provider: string;
   valueC: number;
+  calibratedValueC?: number;
+  sourceBiasC?: number;
   baseWeight: number;
   adjustedWeight: number;
 }
@@ -45,6 +67,15 @@ export interface WeatherConsensus {
   agreement: "VERY_HIGH" | "HIGH" | "MODERATE" | "LOW" | "VERY_LOW";
   hoursToResolution: number;
   forecastPoints: WeatherForecastPoint[];
+  calibration?: {
+    targetKey: string;
+    mode: "historical_residuals";
+    measureSamples: number;
+    biasC: number;
+    targetBiasC: number;
+    meanAbsoluteErrorC: number;
+    ignoredSources: string[];
+  };
   climatology?: {
     meanC: number;
     stdDevC: number;
@@ -104,6 +135,9 @@ export interface WeatherPricingOptions {
   noaaLocationId?: string;
   countryCode?: string;
   allowCityForecast?: boolean;
+  skipCalibration?: boolean;
+  calibrationHalfLifeDays?: number;
+  cityBiasPriorWeight?: number;
   sizingStrategy?: WeatherSizingStrategy;
 }
 
@@ -136,6 +170,79 @@ const DAY_AHEAD_SOURCES: WeatherSourceId[] = [
   "nws",
   "hko"
 ];
+const CALIBRATED_DAY_AHEAD_SOURCES: WeatherSourceId[] = [
+  "openmeteo_gfs",
+  "openmeteo_ecmwf",
+  "openmeteo_ukmo"
+];
+const calibrationCache = new Map<string, Promise<Map<WeatherMeasure, WeatherForecastCalibration>>>();
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
+async function readJsonlRecords<T>(path: string): Promise<T[]> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return [];
+    throw error;
+  }
+
+  return raw
+    .split(/\r?\n/)
+    .flatMap((line, index) => {
+      const trimmed = line.trim();
+      if (!trimmed) return [];
+      try {
+        return [JSON.parse(trimmed) as T];
+      } catch (error) {
+        throw new Error(`Invalid JSONL at ${path}:${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    });
+}
+
+async function loadHistoricalForecastCalibration(
+  config: AppConfig,
+  targetDate: string,
+  options: Pick<WeatherPricingOptions, "calibrationHalfLifeDays" | "cityBiasPriorWeight">
+): Promise<Map<WeatherMeasure, WeatherForecastCalibration>> {
+  const halfLifeDays = Math.max(
+    1,
+    Math.trunc(options.calibrationHalfLifeDays ?? DEFAULT_CALIBRATION_HALF_LIFE_DAYS)
+  );
+  const cityBiasPriorWeight = Math.max(0, options.cityBiasPriorWeight ?? DEFAULT_CITY_BIAS_PRIOR_WEIGHT);
+  const key = [
+    targetDate,
+    halfLifeDays,
+    cityBiasPriorWeight,
+    config.weather.datasets.observationsPath,
+    config.weather.datasets.previousRunForecastsPath,
+    config.weather.datasets.resolutionActualsPath
+  ].join("|");
+  const cached = calibrationCache.get(key);
+  if (cached) return cached;
+
+  const request = (async () => {
+    const [observations, previousRuns, resolutionActuals] = await Promise.all([
+      readJsonlRecords<WeatherObservationRecord>(config.weather.datasets.observationsPath),
+      readJsonlRecords<WeatherPreviousRunForecastRecord>(config.weather.datasets.previousRunForecastsPath),
+      readJsonlRecords<WeatherResolutionActualRecord>(config.weather.datasets.resolutionActualsPath)
+    ]);
+    const actualIndex = buildWeatherActualIndex(observations, resolutionActuals);
+    const forecastValuesByKey = buildPreviousRunForecastValueIndex(previousRuns, {
+      leadDays: 1,
+      sources: CALIBRATED_DAY_AHEAD_SOURCES
+    });
+    return calibrateWeatherForecasts(forecastValuesByKey, actualIndex, targetDate, {
+      halfLifeDays,
+      cityBiasPriorWeight
+    });
+  })();
+  calibrationCache.set(key, request);
+  return request;
+}
 
 function mean(values: number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -321,6 +428,97 @@ function buildConsensus(
       stdDevC: historicalSigma,
       count: climateSummary.count,
       blended: true
+    }
+  };
+}
+
+function currentForecastValuesForMeasure(
+  sourceResults: WeatherSourceResult[],
+  group: WeatherMarketGroup,
+  calibration: WeatherForecastCalibration
+): Array<WeatherSourceForecastValue & { provider: string }> {
+  return sourceResults.flatMap((result) => {
+    if (!result.ok) return [];
+    if (!calibration.sourceCalibrations.has(result.source)) return [];
+    const valueC = forecastValueForSource(result, group.date, group.measure);
+    if (valueC === undefined) return [];
+    return [{
+      source: result.source,
+      provider: result.provider,
+      valueC
+    }];
+  });
+}
+
+function calibratedPricingTargetKey(
+  city: string,
+  location: WeatherLocation,
+  target: WeatherPricingResolutionTarget | undefined
+): string {
+  return weatherStationTargetKey(target?.station?.id) ??
+    (target?.matched ? weatherLocationTargetKey(location) : weatherCityTargetKey(city));
+}
+
+function buildCalibratedConsensus(
+  location: WeatherLocation,
+  group: WeatherMarketGroup,
+  sourceResults: WeatherSourceResult[],
+  calibrationByMeasure: Map<WeatherMeasure, WeatherForecastCalibration>,
+  targetKey: string
+): WeatherConsensus | undefined {
+  const calibration = calibrationByMeasure.get(group.measure);
+  if (!calibration || calibration.samples <= 0) return undefined;
+
+  const values = currentForecastValuesForMeasure(sourceResults, group, calibration);
+  if (values.length === 0) return undefined;
+
+  const aggregate = aggregateCalibratedForecast(values, calibration.sourceCalibrations);
+  const targetBiasC = calibrationBiasForTarget(calibration, targetKey);
+  const meanC = aggregate.meanC + targetBiasC;
+  const modelStdDevC = stdDev(values.map((point) => {
+    const sourceCalibration = calibration.sourceCalibrations.get(point.source);
+    return point.valueC + (sourceCalibration?.biasC ?? 0) + targetBiasC;
+  }));
+  const weightTotal = values.reduce((sum, point) => {
+    const sourceCalibration = calibration.sourceCalibrations.get(point.source);
+    return sum + (sourceCalibration?.ensembleWeight ?? 0);
+  }, 0);
+  const ignoredSources = sourceResults.flatMap((result) =>
+    result.ok && forecastValueForSource(result, group.date, group.measure) !== undefined &&
+      !calibration.sourceCalibrations.has(result.source)
+      ? [result.source]
+      : []
+  );
+
+  return {
+    meanC,
+    sigmaC: calibration.sigmaC,
+    rawMeanC: aggregate.rawMeanC,
+    modelStdDevC,
+    agreement: agreementTier(modelStdDevC),
+    hoursToResolution: hoursToResolution(group),
+    forecastPoints: values.map((point) => {
+      const sourceCalibration = calibration.sourceCalibrations.get(point.source);
+      const sourceBiasC = sourceCalibration?.biasC ?? 0;
+      const baseWeight = sourceCalibration?.ensembleWeight ?? 0;
+      return {
+        source: point.source as WeatherSourceId,
+        provider: point.provider,
+        valueC: point.valueC,
+        calibratedValueC: point.valueC + sourceBiasC + targetBiasC,
+        sourceBiasC,
+        baseWeight,
+        adjustedWeight: weightTotal > 0 ? baseWeight / weightTotal : 0
+      };
+    }),
+    calibration: {
+      targetKey,
+      mode: "historical_residuals",
+      measureSamples: calibration.samples,
+      biasC: calibration.biasC,
+      targetBiasC,
+      meanAbsoluteErrorC: calibration.meanAbsoluteErrorC,
+      ignoredSources: [...new Set(ignoredSources)].sort()
     }
   };
 }
@@ -601,7 +799,11 @@ export async function priceWeatherMarketGroup(
     ? clamp(Math.ceil((targetTime - Date.now()) / 86_400_000) + 1, 1, 16)
     : 7;
   const forecastTarget = await resolvePricingForecastTarget(config, group, options);
-  const sources = sourcesForPricingTarget(forecastTarget.resolutionTarget);
+  const useCalibration = options.skipCalibration !== true;
+  const sources = sourcesForPricingTarget(
+    forecastTarget.resolutionTarget,
+    useCalibration ? CALIBRATED_DAY_AHEAD_SOURCES : undefined
+  );
   const forecastReport = forecastTarget.strictError
     ? {
       location: forecastTarget.location,
@@ -621,11 +823,15 @@ export async function priceWeatherMarketGroup(
   if (forecastTarget.strictError) {
     errors.push(forecastTarget.strictError);
   }
-  const climatology = options.skipClimatology
+  const calibration = useCalibration && !forecastTarget.strictError
+    ? await loadHistoricalForecastCalibration(config, group.date, options)
+    : undefined;
+  const targetKey = calibratedPricingTargetKey(group.city, forecastTarget.location, forecastTarget.resolutionTarget);
+  const climatology = useCalibration || options.skipClimatology
     ? undefined
     : forecastTarget.strictError
       ? undefined
-    : await fetchNoaaClimatology(config, forecastReport.location, {
+      : await fetchNoaaClimatology(config, forecastReport.location, {
       targetDate: group.date,
       years: options.noaaYears,
       noaaStationId: options.noaaStationId,
@@ -635,14 +841,24 @@ export async function priceWeatherMarketGroup(
     errors.push(climatology.error ?? "NOAA climatology failed.");
   }
 
-  const consensus = buildConsensus(
-    forecastReport.location,
-    group,
-    forecastReport.results,
-    climatology?.ok ? climatology : undefined
-  );
+  const consensus = calibration
+    ? buildCalibratedConsensus(
+      forecastReport.location,
+      group,
+      forecastReport.results,
+      calibration,
+      targetKey
+    )
+    : buildConsensus(
+      forecastReport.location,
+      group,
+      forecastReport.results,
+      climatology?.ok ? climatology : undefined
+    );
   if (!consensus) {
-    errors.push(`No forecast source returned ${group.measure} for ${group.city} on ${group.date}.`);
+    errors.push(useCalibration
+      ? `No calibrated forecast source returned ${group.measure} for ${group.city} on ${group.date}; refresh previous-run forecast and actual datasets.`
+      : `No forecast source returned ${group.measure} for ${group.city} on ${group.date}.`);
   }
 
   return {
