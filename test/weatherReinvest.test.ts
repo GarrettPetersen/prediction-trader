@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { deployableWeatherCash } from "../src/weatherReinvest.js";
+import { deployableWeatherCash, requireReinvestMinEdge } from "../src/weatherReinvest.js";
 
 describe("weather reinvestment cash reserve", () => {
   it("keeps the target reserve out of deployable cash", () => {
@@ -11,5 +11,18 @@ describe("weather reinvestment cash reserve", () => {
 
   it("treats negative reserve inputs as zero", () => {
     assert.equal(deployableWeatherCash(12.34, -5), 12.34);
+  });
+});
+
+describe("weather reinvestment edge threshold", () => {
+  it("requires an explicit live reinvestment threshold", () => {
+    assert.throws(
+      () => requireReinvestMinEdge(),
+      /requires --min-edge/
+    );
+  });
+
+  it("uses the explicit threshold", () => {
+    assert.equal(requireReinvestMinEdge(0.20), 0.20);
   });
 });

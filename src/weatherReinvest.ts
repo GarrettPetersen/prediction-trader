@@ -165,6 +165,13 @@ export function deployableWeatherCash(cashUsd: number, targetCashReserveUsd = 0)
   return roundUsd(Math.max(0, cashUsd - Math.max(0, targetCashReserveUsd)));
 }
 
+export function requireReinvestMinEdge(minEdge?: number): number {
+  if (minEdge === undefined || !Number.isFinite(minEdge)) {
+    throw new Error("weather:reinvest requires --min-edge; do not rely on implicit live-trading edge thresholds.");
+  }
+  return minEdge;
+}
+
 function isWeatherPosition(position: VistadexPosition): boolean {
   return WEATHER_QUESTION_PATTERN.test(position.question ?? "");
 }
@@ -737,7 +744,7 @@ export async function runWeatherReinvestment(
       maxKellyFraction: options.maxKellyFraction ?? 0.25,
       maxGroupFraction: buyOptions.maxGroupFraction,
       portfolioStepUsd: options.portfolioStepUsd ?? 0.5,
-      minEdge: options.minEdge,
+      minEdge: requireReinvestMinEdge(options.minEdge),
       skipClimatology: options.skipClimatology,
       sizingStrategy: "city_portfolio"
     });

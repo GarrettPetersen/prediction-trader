@@ -475,6 +475,7 @@ npm run weather:reinvest -- \
   --max-group-fraction 0.25 \
   --kelly-multiplier 0.25 \
   --max-kelly-fraction 0.25 \
+  --min-edge 0.20 \
   --min-cash-to-reinvest 5 \
   --target-cash-reserve 20 \
   --min-confidence medium \
@@ -531,6 +532,7 @@ WEATHEREDGE_MAX_BUYS=8
 WEATHEREDGE_MAX_GROUP_FRACTION=0.25
 WEATHEREDGE_KELLY_MULTIPLIER=0.25
 WEATHEREDGE_MAX_KELLY_FRACTION=0.25
+WEATHEREDGE_MIN_EDGE=0.20
 WEATHEREDGE_MIN_CONFIDENCE=medium
 WEATHEREDGE_MIN_CASH_TO_REINVEST=5
 WEATHEREDGE_TARGET_CASH_RESERVE=20
@@ -540,6 +542,10 @@ WEATHEREDGE_SKIP_CLIMATOLOGY=0
 PREDICTION_TRADER_MAX_USD=10
 NWS_USER_AGENT=prediction-trader/0.1 weatheredge github-actions
 ```
+
+`WEATHEREDGE_MIN_EDGE` is intentionally required rather than defaulted. A
+missing live-trading edge threshold should fail the scheduled run instead of
+quietly widening the strategy.
 
 The workflow sets `TZ=America/Vancouver`, so `--days-ahead 1` means tomorrow
 from British Columbia rather than UTC. Candidate buys are still gated by the
