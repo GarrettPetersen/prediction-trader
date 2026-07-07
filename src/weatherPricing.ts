@@ -566,7 +566,7 @@ function hkoForecastLocation(): WeatherLocation {
   };
 }
 
-function hongKongFallbackTarget(
+function explicitHkoSettlementTarget(
   group: WeatherMarketGroup,
   target: WeatherStationForecastTarget
 ): WeatherStationForecastTarget | undefined {
@@ -740,7 +740,7 @@ export async function resolvePricingForecastTarget(
 }> {
   let stationTarget = await resolveStationForecastTarget(group);
   if (!stationTarget.location) {
-    stationTarget = hongKongFallbackTarget(group, stationTarget) ?? stationTarget;
+    stationTarget = explicitHkoSettlementTarget(group, stationTarget) ?? stationTarget;
   }
 
   if (stationTarget.location) {

@@ -55,6 +55,18 @@ recommended operating pattern is:
 - Do not use this tooling to bypass geoblocks, account restrictions, or a
   venue's terms.
 
+### No Fallbacks
+
+This repo is not a consumer app that needs to hide broken dependencies. Trading
+execution must fail closed:
+
+- Missing required config, calibration data, station/feed mappings, or live
+  quotes means no trade.
+- Research or diagnostic commands may expose approximate/proxy modes only when
+  the output labels them explicitly as non-production.
+- Do not add fallback execution paths. If the intended data source or model is
+  unavailable, surface the error or skip the trade.
+
 ## Prerequisites
 
 - Node.js 20 or newer for the original order/RFQ tooling. Node.js 24 or newer
@@ -312,7 +324,7 @@ The RainBot-style pipeline is CLI-first and review-first:
 4. Apply historical previous-run calibration: source-specific residual bias,
    station/city residual bias with shrinkage, and fitted error sigma.
 5. Refuse to emit production signals when calibrated forecast/actual datasets
-   are missing for the target family. No silent city or climatology fallback.
+   are missing for the target family. No silent city or climatology substitute.
 6. Price each outcome with a Normal CDF.
 7. Compare fair probability to market prices, apply a dynamic edge threshold,
    and size with fractional Kelly. Defaults are quarter-Kelly
@@ -542,7 +554,7 @@ NOAA_CDO_TOKEN
 `NOAA_CDO_TOKEN` is optional for the scheduled trader, but recommended for
 dataset collection and source audits. Calibrated live pricing depends on saved
 previous-run forecast and actual datasets, not on a same-day NOAA climatology
-fallback.
+substitute.
 
 Configure repository variables:
 
@@ -683,8 +695,8 @@ settlement source, and writes records to
 - `wunderground`: the legacy Wunderground parse when the market resolves by
   Wunderground, kept for old backtest compatibility.
 - `metar`: the free AviationWeather METAR station-day high/low where a station
-  METAR feed exists; this is diagnostic unless it is explicitly the fallback
-  for a Weather.gov timeseries market.
+  METAR feed exists; this is diagnostic unless the market's documented
+  settlement source is a METAR-style timeseries.
 - Per-bucket `resolutionYes`, `wundergroundYes`, and `metarYes` flags so we can
   audit whether proxy feeds would resolve the market the same way as the exact
   settlement source.
@@ -857,7 +869,7 @@ Current WeatherEdge limits:
   `weather:midday` for same-day station markets: exact resolution-source
   actuals are available for Wunderground, HKO Daily Extract, and Weather.gov
   timeseries markets where the public source can be fetched; AviationWeather
-  METARs remain a proxy/fallback for station diagnostics. If
+  METARs remain a diagnostic proxy for station audits. If
   `weather:edges --allow-started-day` is used for inspection, rows from
   already-started market-local days are downgraded to `SKIP`; use
   `weather:midday` for actual intraday signal generation.
@@ -994,13 +1006,13 @@ npm run football:score -- \
 ```
 
 If `--history` is supplied to `football:score`, it uses the historical CSV
-soccer model instead of the Elo-derived fallback.
+soccer model instead of the Elo-derived estimate.
 
 Current score-model limits:
 
 - The historical soccer model uses team-level goals for/against. It does not
   include injuries, lineups, cards, rest, travel, weather, shots, or xG yet.
-- The Elo fallback is a bridge for immediate international use; real historical
+- The Elo-derived estimate is a bridge for immediate international use; real historical
   result data should be preferred when available.
 - Exact score and total-goals probabilities should be compared to market prices,
   spreads, liquidity, fees, and correlation with the existing portfolio before

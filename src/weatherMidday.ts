@@ -393,7 +393,7 @@ function looksLikeHkoSettlementGroup(group: WeatherMarketGroup): boolean {
     );
 }
 
-function hongKongFallbackTarget(
+function explicitHkoSettlementTarget(
   group: WeatherMarketGroup,
   target: WeatherStationForecastTarget
 ): WeatherStationForecastTarget | undefined {
@@ -413,8 +413,8 @@ function hongKongFallbackTarget(
     },
     matched: true,
     note: target.note
-      ? `${target.note} Using Hong Kong Observatory as the same-day fallback.`
-      : "Using Hong Kong Observatory as the same-day fallback."
+      ? `${target.note} Using Hong Kong Observatory because the market explicitly references HKO.`
+      : "Using Hong Kong Observatory because the market explicitly references HKO."
   };
 }
 
@@ -930,8 +930,8 @@ async function priceMiddayWeatherGroup(
   const errors: string[] = [];
   let target = await resolveStationForecastTarget(group);
   if (!target.matched || !target.station || !target.location) {
-    const fallback = hongKongFallbackTarget(group, target);
-    if (!fallback) {
+    const hkoTarget = explicitHkoSettlementTarget(group, target);
+    if (!hkoTarget) {
       return {
         group: groupSummary(group),
         resolutionSource: target.resolutionSource,
@@ -941,8 +941,8 @@ async function priceMiddayWeatherGroup(
       };
     }
 
-    target = fallback;
-    if (fallback.note) errors.push(fallback.note);
+    target = hkoTarget;
+    if (hkoTarget.note) errors.push(hkoTarget.note);
   }
   const station = target.station;
   const location = target.location;

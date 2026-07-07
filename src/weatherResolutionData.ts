@@ -747,7 +747,7 @@ export function parseNoaaTimeseriesDailyActualFromAviationMetars(
     maxTempC: Math.max(...values),
     minTempC: Math.min(...values),
     rawUnit: "C",
-    note: `${options.notePrefix ? `${options.notePrefix} ` : ""}Parsed ${dayTemps.length} same-day METAR/SPECI temperature observations from AviationWeather fallback.`,
+    note: `${options.notePrefix ? `${options.notePrefix} ` : ""}Parsed ${dayTemps.length} same-day METAR/SPECI temperature observations from AviationWeather diagnostic proxy.`,
     raw: {
       source: "aviationweather_metar",
       timezone: options.timezone,

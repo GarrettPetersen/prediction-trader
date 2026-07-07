@@ -185,7 +185,7 @@ describe("weather resolution actual helpers", () => {
     assert.equal(actual.minTempC, 22);
   });
 
-  it("parses AviationWeather METAR fallback observations by local station day", () => {
+  it("parses AviationWeather METAR diagnostic proxy observations by local station day", () => {
     const actual = parseNoaaTimeseriesDailyActualFromAviationMetars(JSON.stringify([
       { icaoId: "LTFM", reportTime: "2026-07-04T21:50:00.000Z", temp: 22 },
       { icaoId: "LTFM", reportTime: "2026-07-05T10:50:00.000Z", temp: 32 },

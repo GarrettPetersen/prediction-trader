@@ -36,8 +36,8 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function finiteOrDefault(value: number | undefined, fallback: number): number {
-  return value === undefined || !Number.isFinite(value) ? fallback : value;
+function finiteOrDefault(value: number | undefined, defaultValue: number): number {
+  return value === undefined || !Number.isFinite(value) ? defaultValue : value;
 }
 
 export function binaryKellyFraction(input: BinaryKellyInput): number {

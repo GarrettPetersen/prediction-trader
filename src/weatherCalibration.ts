@@ -243,19 +243,19 @@ export function calibrateWeatherForecasts(
 
   return new Map((["temperature_high", "temperature_low"] as const).map((measure) => {
     const sourcePool = sourceResidualPool[measure];
-    const fallbackSourceBias = sourcePool.length > 0 ? weightedMean(sourcePool) : 0;
-    const fallbackSourceSigma = sourcePool.length > 0
-      ? Math.max(0.5, weightedStdDev(sourcePool, fallbackSourceBias))
+    const pooledSourceBias = sourcePool.length > 0 ? weightedMean(sourcePool) : 0;
+    const pooledSourceSigma = sourcePool.length > 0
+      ? Math.max(0.5, weightedStdDev(sourcePool, pooledSourceBias))
       : 2.5;
     const sourceCalibrations = new Map<string, WeatherSourceCalibration>();
 
     for (const [source, values] of sourceResiduals[measure].entries()) {
       const sourceMean = weightedMean(values);
       const shrinkage = values.length / (values.length + SOURCE_CALIBRATION_PRIOR_SAMPLES);
-      const biasC = fallbackSourceBias + (sourceMean - fallbackSourceBias) * shrinkage;
+      const biasC = pooledSourceBias + (sourceMean - pooledSourceBias) * shrinkage;
       const rawSigma = Math.max(0.5, weightedStdDev(values, sourceMean));
       const sigmaC = Math.sqrt(
-        ((rawSigma ** 2) * values.length + (fallbackSourceSigma ** 2) * SOURCE_CALIBRATION_PRIOR_SAMPLES) /
+        ((rawSigma ** 2) * values.length + (pooledSourceSigma ** 2) * SOURCE_CALIBRATION_PRIOR_SAMPLES) /
         (values.length + SOURCE_CALIBRATION_PRIOR_SAMPLES)
       );
       sourceCalibrations.set(source, {

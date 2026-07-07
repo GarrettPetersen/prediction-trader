@@ -202,8 +202,8 @@ function arrayStringAt(value: unknown, index: number): string | undefined {
   return stringValue(value[index]);
 }
 
-function positiveInteger(value: number | undefined, fallback: number): number {
-  if (value === undefined || !Number.isFinite(value)) return fallback;
+function positiveInteger(value: number | undefined, defaultValue: number): number {
+  if (value === undefined || !Number.isFinite(value)) return defaultValue;
   return Math.max(1, Math.trunc(value));
 }
 
