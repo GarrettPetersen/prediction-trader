@@ -1,6 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { deployableWeatherCash, requireReinvestMinEdge } from "../src/weatherReinvest.js";
+import {
+  assertReinvestCalibrationEnabled,
+  deployableWeatherCash,
+  requireReinvestMinEdge
+} from "../src/weatherReinvest.js";
 
 describe("weather reinvestment cash reserve", () => {
   it("keeps the target reserve out of deployable cash", () => {
@@ -24,5 +28,19 @@ describe("weather reinvestment edge threshold", () => {
 
   it("uses the explicit threshold", () => {
     assert.equal(requireReinvestMinEdge(0.20), 0.20);
+  });
+});
+
+describe("weather reinvestment calibration gate", () => {
+  it("rejects diagnostics-only no-calibration mode", () => {
+    assert.throws(
+      () => assertReinvestCalibrationEnabled(true),
+      /requires calibrated historical residuals/
+    );
+  });
+
+  it("allows calibrated mode", () => {
+    assert.doesNotThrow(() => assertReinvestCalibrationEnabled(undefined));
+    assert.doesNotThrow(() => assertReinvestCalibrationEnabled(false));
   });
 });

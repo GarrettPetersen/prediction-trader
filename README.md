@@ -211,7 +211,8 @@ bias, and fitted sigma learned from `WEATHER_PREVIOUS_RUN_FORECASTS_PATH`,
 remain useful source integrations and diagnostics, but they are not part of the
 default live day-ahead trading consensus until we have comparable historical
 calibration data for them. Pass `--no-calibration` only for diagnostics; the
-uncalibrated path is not the production strategy.
+uncalibrated path is not the production strategy and `weather:reinvest` refuses
+to run with it.
 
 WeatherEdge research notes:
 
@@ -559,8 +560,6 @@ WEATHEREDGE_MIN_CASH_TO_REINVEST=5
 WEATHEREDGE_TARGET_CASH_RESERVE=20
 WEATHEREDGE_ENTRY_START_LOCAL_TIME=20:00
 WEATHEREDGE_ENTRY_END_LOCAL_TIME=23:30
-WEATHEREDGE_SKIP_CLIMATOLOGY=0
-WEATHEREDGE_SKIP_CALIBRATION=0
 WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS=
 WEATHEREDGE_CITY_BIAS_PRIOR_WEIGHT=
 PREDICTION_TRADER_MAX_USD=10
@@ -570,6 +569,11 @@ NWS_USER_AGENT=prediction-trader/0.1 weatheredge github-actions
 `WEATHEREDGE_MIN_EDGE` is intentionally required rather than defaulted. A
 missing live-trading edge threshold should fail the scheduled run instead of
 quietly widening the strategy.
+
+The scheduled reinvestment loop has no `WEATHEREDGE_SKIP_CALIBRATION` escape
+hatch. If calibration datasets are missing, unreadable, or unable to produce
+historical-residual pricing, the run fails or skips buys instead of falling back
+to heuristic pricing.
 
 The workflow sets `TZ=America/Vancouver`, so `--days-ahead 1` means tomorrow
 from British Columbia rather than UTC. Candidate buys are still gated by the

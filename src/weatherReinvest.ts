@@ -183,6 +183,12 @@ export function requireReinvestMinEdge(minEdge?: number): number {
   return minEdge;
 }
 
+export function assertReinvestCalibrationEnabled(skipCalibration?: boolean): void {
+  if (skipCalibration === true) {
+    throw new Error("weather:reinvest requires calibrated historical residuals; --no-calibration is only for diagnostics.");
+  }
+}
+
 function isWeatherPosition(position: VistadexPosition): boolean {
   return WEATHER_QUESTION_PATTERN.test(position.question ?? "");
 }
@@ -568,6 +574,14 @@ async function buyPositiveWeatherEdges(
       skipped.push({ ...base, status: "skipped", reason: "Forecast target did not match the resolution station/feed." });
       continue;
     }
+    if (row.modelMode !== "historical_residuals") {
+      skipped.push({
+        ...base,
+        status: "skipped",
+        reason: "WeatherEdge live reinvestment requires calibrated historical residuals; heuristic pricing is diagnostics-only."
+      });
+      continue;
+    }
     if (!confidenceAtLeast(row.confidence, options.minConfidence)) {
       skipped.push({ ...base, status: "skipped", reason: `Confidence ${row.confidence} below minimum ${options.minConfidence}.` });
       continue;
@@ -690,6 +704,7 @@ export async function runWeatherReinvestment(
   options: WeatherReinvestOptions = {}
 ): Promise<WeatherReinvestReport> {
   const startedAt = new Date().toISOString();
+  assertReinvestCalibrationEnabled(options.skipCalibration);
   const ledgerPath = options.ledgerPath ?? config.ledger.path;
   const execute = options.execute === true;
   const sellOptions = {
