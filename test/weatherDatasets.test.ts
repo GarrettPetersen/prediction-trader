@@ -14,6 +14,11 @@ import {
   type WeatherBacktestRunRecord,
   type WeatherResolutionActualRecord
 } from "../src/weatherDatasets.js";
+import {
+  actualValueForMeasure,
+  buildWeatherActualIndex,
+  weatherObservationKey
+} from "../src/weatherCalibration.js";
 import type { WeatherMarketCandidate } from "../src/weatherMarkets.js";
 
 describe("weather dataset stores", () => {
@@ -263,5 +268,60 @@ describe("weather dataset stores", () => {
     assert.equal(summary.resolutionActuals.count, 1);
     assert.equal(summary.resolutionActuals.distinctMarkets, 1);
     assert.deepEqual(summary.resolutionActuals.targetDates, ["2026-07-04"]);
+  });
+
+  it("skips resolution actuals that disagree with official Polymarket outcomes", () => {
+    const mismatched: WeatherResolutionActualRecord = {
+      id: "actual:mismatch",
+      source: "weather_resolution_actual",
+      fetchedAt: "2026-07-07T00:00:00.000Z",
+      marketSnapshotCapturedAt: "all",
+      eventSlug: "highest-temperature-in-atlanta-on-march-19-2026",
+      eventTitle: "Highest temperature in Atlanta on March 19?",
+      city: "Atlanta",
+      date: "2026-03-19",
+      measure: "temperature_high",
+      resolutionStationId: "KATL",
+      extremeC: { resolution: 14 },
+      outcomes: [{
+        marketSlug: "highest-temperature-in-atlanta-on-march-19-2026-68-69f",
+        question: "Will the highest temperature in Atlanta be between 68-69°F on March 19?",
+        outcomeLabel: "68-69F",
+        polymarketYes: true,
+        resolutionYes: false
+      }],
+      warnings: [],
+      errors: []
+    };
+    const matched: WeatherResolutionActualRecord = {
+      id: "actual:match",
+      source: "weather_resolution_actual",
+      fetchedAt: "2026-07-07T00:00:00.000Z",
+      marketSnapshotCapturedAt: "all",
+      eventSlug: "highest-temperature-in-dallas-on-march-19-2026",
+      eventTitle: "Highest temperature in Dallas on March 19?",
+      city: "Dallas",
+      date: "2026-03-19",
+      measure: "temperature_high",
+      resolutionStationId: "KDAL",
+      extremeC: { resolution: 30 },
+      outcomes: [{
+        marketSlug: "highest-temperature-in-dallas-on-march-19-2026-86-87f",
+        question: "Will the highest temperature in Dallas be between 86-87°F on March 19?",
+        outcomeLabel: "86-87F",
+        polymarketYes: true,
+        resolutionYes: true
+      }],
+      warnings: [],
+      errors: []
+    };
+
+    const index = buildWeatherActualIndex([], [mismatched, matched]);
+
+    assert.equal(index.has(weatherObservationKey("station:KATL", "2026-03-19")), false);
+    assert.equal(
+      actualValueForMeasure(index.get(weatherObservationKey("station:KDAL", "2026-03-19")), "temperature_high"),
+      30
+    );
   });
 });

@@ -654,9 +654,11 @@ function compactWeatherResolutionActualRecord(record: WeatherResolutionActualRec
       deltaMetarMinusResolution: formatFahrenheitDelta(record.extremeC?.deltaMetarMinusResolution),
       deltaMetarMinusWunderground: formatFahrenheitDelta(record.extremeC?.deltaMetarMinusWunderground)
     },
+    officialAgreement: record.officialAgreement,
     outcomes: record.outcomes.map((outcome) => ({
       marketSlug: outcome.marketSlug,
       outcomeLabel: outcome.outcomeLabel,
+      polymarketYes: outcome.polymarketYes,
       resolutionYes: outcome.resolutionYes,
       wundergroundYes: outcome.wundergroundYes,
       metarYes: outcome.metarYes
@@ -1108,10 +1110,10 @@ Commands:
   weather:reinvest [--execute] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--min-edge N] [--min-cash-to-reinvest N] [--target-cash-reserve N] [--min-confidence low|medium|high] [--no-calibration] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--entry-start-local-time HH:MM] [--entry-end-local-time HH:MM] [--report-path PATH]
   weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N]
   weather:dataset:observations (--city CITY [--country CODE] | --latitude N --longitude N) --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--ncei-station ID | --ncei-location ID] [--path PATH]
-  weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--path PATH]
+  weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--closed] [--descending] [--path PATH]
   weather:dataset:forecasts [--market-captured-at ISO] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko] [--max-cities N] [--path PATH]
   weather:dataset:previous-runs --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--market-captured-at ISO] [--cities CITY[,CITY...]] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--lead-days 1,2,3] [--max-cities N] [--path PATH]
-  weather:dataset:resolution-actuals [--market-captured-at ISO] [--date YYYY-MM-DD] [--metar-hours N] [--max-groups N] [--no-wunderground] [--path PATH]
+  weather:dataset:resolution-actuals [--market-captured-at ISO | --all-captures] [--date YYYY-MM-DD] [--metar-hours N] [--max-groups N] [--no-wunderground] [--path PATH]
   weather:dataset:run [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--no-climatology] [--path PATH]
   weather:dataset:summary
   football:ratings [--refresh] [--team TEAM] [--limit N]
@@ -1574,6 +1576,8 @@ async function run(): Promise<void> {
       limit: numberArg(args, "limit", false),
       maxPages: numberArg(args, "max-pages", false),
       includeExpired: args["include-expired"] === true,
+      closed: args.closed === true,
+      ascending: args.descending === true ? false : undefined,
       path: stringArg(args, "path", false)
     });
     print(args.raw === true
@@ -1665,6 +1669,7 @@ async function run(): Promise<void> {
   if (command === "weather:dataset:resolution-actuals") {
     const result = await collectWeatherResolutionActualsDataset(config, {
       marketSnapshotCapturedAt: stringArg(args, "market-captured-at", false),
+      allCaptures: args["all-captures"] === true,
       date: stringArg(args, "date", false),
       metarHours: numberArg(args, "metar-hours", false),
       maxGroups: numberArg(args, "max-groups", false),

@@ -3,6 +3,7 @@ import type {
   WeatherPreviousRunForecastRecord,
   WeatherResolutionActualRecord
 } from "./weatherDatasets.js";
+import { weatherResolutionActualMatchesOfficial } from "./weatherDatasets.js";
 import type { WeatherMeasure } from "./weatherMarkets.js";
 import {
   weatherCityTargetKey,
@@ -163,7 +164,8 @@ export function buildWeatherActualIndex(
     });
   }
   for (const record of resolutionActuals) {
-    const valueC = record.extremeC?.resolution ?? record.extremeC?.wunderground ?? record.extremeC?.metar;
+    if (!weatherResolutionActualMatchesOfficial(record)) continue;
+    const valueC = record.extremeC?.resolution;
     const stationTarget = weatherStationTargetKey(record.resolutionStationId);
     if (stationTarget) {
       setActualIndexValue(index, stationTarget, record.date, record.measure, valueC);

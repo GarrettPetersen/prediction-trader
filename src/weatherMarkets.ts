@@ -63,6 +63,7 @@ export interface WeatherMarketCandidate {
   bestAsk?: number;
   liquidity?: number;
   volume?: number;
+  resolvedYes?: boolean;
   outcomes: WeatherMarketOutcomeToken[];
   parsed: ParsedWeatherMarket;
 }
@@ -85,6 +86,7 @@ export interface WeatherScanOptions {
   includeUnparsed?: boolean;
   active?: boolean;
   closed?: boolean;
+  ascending?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -102,6 +104,33 @@ function boolValue(value: unknown): boolean {
 function numberValue(value: unknown): number | undefined {
   const number = Number(value);
   return Number.isFinite(number) ? number : undefined;
+}
+
+export function resolvedYesFromOutcomeTokens(
+  outcomes: WeatherMarketOutcomeToken[]
+): boolean | undefined {
+  const yesToken = outcomes.find((item) => item.outcome.toLowerCase() === "yes");
+  const prices = outcomes.flatMap((item) =>
+    item.price === undefined || !Number.isFinite(item.price) ? [] : [item.price]
+  );
+  if (!yesToken || yesToken.price === undefined || prices.length !== outcomes.length) return undefined;
+
+  const maxPrice = Math.max(...prices);
+  const minPrice = Math.min(...prices);
+  if (maxPrice < 0.99 || minPrice > 0.01) return undefined;
+  return yesToken.price >= 0.99;
+}
+
+export function resolvedYesFromGammaOutcomePrices(
+  outcomesRaw: unknown,
+  outcomePricesRaw: unknown
+): boolean | undefined {
+  const outcomes = parseGammaList(outcomesRaw);
+  const prices = parseGammaList(outcomePricesRaw).map(Number);
+  return resolvedYesFromOutcomeTokens(outcomes.map((outcome, index) => ({
+    outcome,
+    price: Number.isFinite(prices[index]) ? prices[index] : undefined
+  })));
 }
 
 function isoDateFromMonthDay(monthDay: string, year: number): string | undefined {
@@ -263,6 +292,12 @@ function normalizeWeatherMarketCandidate(
   const outcomes = parseGammaList(market.outcomes);
   const tokenIds = parseGammaList(market.clobTokenIds);
   const prices = parseGammaList(market.outcomePrices).map(Number);
+  const closed = boolValue(market.closed);
+  const outcomeTokens = outcomes.map((outcome, index) => ({
+    outcome,
+    tokenId: tokenIds[index],
+    price: Number.isFinite(prices[index]) ? prices[index] : undefined
+  }));
 
   return {
     eventSlug,
@@ -274,18 +309,15 @@ function normalizeWeatherMarketCandidate(
     resolutionSource: stringValue(market.resolutionSource) ?? resolutionSourceFromText(description),
     conditionId: stringValue(market.conditionId),
     active: boolValue(market.active),
-    closed: boolValue(market.closed),
+    closed,
     acceptingOrders: market.acceptingOrders === undefined ? undefined : boolValue(market.acceptingOrders),
     negRisk: market.negRisk === undefined ? undefined : boolValue(market.negRisk),
     bestBid: numberValue(market.bestBid),
     bestAsk: numberValue(market.bestAsk),
     liquidity: numberValue(market.liquidityNum ?? market.liquidity),
     volume: numberValue(market.volumeNum ?? market.volume),
-    outcomes: outcomes.map((outcome, index) => ({
-      outcome,
-      tokenId: tokenIds[index],
-      price: Number.isFinite(prices[index]) ? prices[index] : undefined
-    })),
+    resolvedYes: closed ? resolvedYesFromOutcomeTokens(outcomeTokens) : undefined,
+    outcomes: outcomeTokens,
     parsed
   };
 }
@@ -316,6 +348,7 @@ export async function fetchPolymarketWeatherMarkets(
   const groups = new Map<string, WeatherMarketGroup>();
   const now = Date.now();
   const closed = options.closed ?? false;
+  const ascending = options.ascending ?? !closed;
 
   for (let page = 0; page < maxPages; page += 1) {
     const url = new URL("/events", POLYMARKET_GAMMA_BASE_URL);
@@ -329,7 +362,7 @@ export async function fetchPolymarketWeatherMarkets(
     url.searchParams.set("limit", String(limit));
     url.searchParams.set("offset", String(page * limit));
     url.searchParams.set("order", "endDate");
-    url.searchParams.set("ascending", "true");
+    url.searchParams.set("ascending", String(ascending));
 
     const raw = await fetchJson(url);
     if (!Array.isArray(raw) || raw.length === 0) break;

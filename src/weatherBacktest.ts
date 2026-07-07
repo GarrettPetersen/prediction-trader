@@ -6,7 +6,12 @@ import {
   type WeatherResolutionActualRecord,
   readJsonlRecords
 } from "./weatherDatasets.js";
-import { parseWeatherMarketQuestion, type ParsedWeatherMarket, type WeatherMeasure } from "./weatherMarkets.js";
+import {
+  parseWeatherMarketQuestion,
+  resolvedYesFromGammaOutcomePrices,
+  type ParsedWeatherMarket,
+  type WeatherMeasure
+} from "./weatherMarkets.js";
 import { probabilityInRange } from "./weatherPricing.js";
 import {
   parseResolutionSource,
@@ -264,20 +269,6 @@ function marketResolvesYes(parsed: ParsedWeatherMarket, actualC: number): boolea
   return (lower === undefined || actualC >= lower) && (upper === undefined || actualC < upper);
 }
 
-function parseResolvedYes(outcomesRaw: unknown, outcomePricesRaw: unknown): boolean | undefined {
-  const outcomes = parseGammaList(outcomesRaw);
-  const prices = parseGammaList(outcomePricesRaw).map((price) => Number(price));
-  const yesIndex = outcomes.findIndex((outcome) => outcome.toLowerCase() === "yes");
-  if (yesIndex < 0 || prices.length <= yesIndex) return undefined;
-  if (!prices.every((price) => Number.isFinite(price))) return undefined;
-
-  const yesPrice = prices[yesIndex];
-  const maxPrice = Math.max(...prices);
-  const minPrice = Math.min(...prices);
-  if (maxPrice < 0.99 || minPrice > 0.01) return undefined;
-  return yesPrice >= 0.99;
-}
-
 function bestEntryPriceAtOrBefore(
   history: PricePoint[],
   decisionTimeSec: number,
@@ -469,7 +460,7 @@ async function fetchClosedWeatherMarkets(date: string, options: { limit: number;
           yesTokenId: yesIndex >= 0 ? tokenIds[yesIndex] : undefined,
           resolutionSource: stringValue(marketRaw.resolutionSource) ??
             resolutionSourceFromText(stringValue(marketRaw.description) ?? stringValue(eventRaw.description)),
-          resolvedYes: parseResolvedYes(marketRaw.outcomes, marketRaw.outcomePrices)
+          resolvedYes: resolvedYesFromGammaOutcomePrices(marketRaw.outcomes, marketRaw.outcomePrices)
         });
       }
     }

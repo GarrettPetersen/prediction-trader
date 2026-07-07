@@ -77,6 +77,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           REQUIRED_DATASETS="
+          data/weather/markets/polymarket-weather-snapshots.jsonl
           data/weather/forecasts/openmeteo-previous-runs.jsonl
           data/weather/observations/noaa-ghcnd-daily.jsonl
           data/weather/resolution/weather-resolution-actuals.jsonl

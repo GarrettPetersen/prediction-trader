@@ -164,8 +164,8 @@ Open-Meteo, NWS, and HKO do not require secrets for the basic pulls implemented
 here. NOAA NCEI CDO requires a free token, sent as the `token` header. Keep it
 local in `.env`; it is not needed for live forecast pulls. NOAA CDO station and
 daily-data responses are cached under `WEATHER_CACHE_DIR` so repeated scans do
-not burn quota fetching the same climatology dates. The three
-`WEATHER_*_PATH` dataset files are durable local JSONL stores for actual NOAA
+not burn quota fetching the same climatology dates. The `WEATHER_*_PATH`
+dataset files are durable local JSONL stores for actual NOAA
 observations, Polymarket weather market snapshots, provider forecast snapshots,
 Open-Meteo previous-run forecasts for already-resolved dates, settlement-source
 actuals, and WeatherEdge model runs; they are ignored by git.
@@ -656,6 +656,19 @@ npm run weather:dataset:markets -- \
   --max-pages 20
 ```
 
+Backfill closed Polymarket weather markets, including official binary
+resolutions inferred from final 1/0 `outcomePrices`. Closed pulls are
+newest-first by default, so bounded pulls enrich the most recent resolved
+markets first:
+
+```bash
+npm run weather:dataset:markets -- \
+  --closed \
+  --include-expired \
+  --limit 100 \
+  --max-pages 20
+```
+
 Snapshot provider forecasts for the latest saved market snapshot:
 
 ```bash
@@ -684,14 +697,27 @@ npm run weather:dataset:resolution-actuals -- \
   --metar-hours 72
 ```
 
-This reads the latest saved market snapshot, resolves each market group to its
-settlement source, and writes records to
-`WEATHER_RESOLUTION_ACTUALS_PATH`. Each record stores:
+Use `--all-captures` when enriching the whole historical market snapshot file
+rather than just the latest capture:
 
+```bash
+npm run weather:dataset:resolution-actuals -- \
+  --all-captures \
+  --metar-hours 96
+```
+
+This reads saved market snapshots, resolves each market group to its settlement
+source, and writes records to `WEATHER_RESOLUTION_ACTUALS_PATH`. Each record
+stores:
+
+- `polymarketYes`: the official YES/NO result inferred from Polymarket Gamma's
+  final closed-market `outcomePrices`. This is the authority for binary
+  settlement and PnL evaluation.
 - `resolution`: the best exact settlement-source daily high/low we can fetch
   for the market, currently Weather.com historical station observations for
   Wunderground-resolved markets, HKO Daily Extract JSON, or Weather.gov/Synoptic
-  station timeseries.
+  station timeseries. This is the numeric station actual used for forecast-error
+  calibration when available.
 - `wunderground`: the legacy Wunderground parse when the market resolves by
   Wunderground, kept for old backtest compatibility.
 - `metar`: the free AviationWeather METAR station-day high/low where a station

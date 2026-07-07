@@ -44,6 +44,7 @@ import {
 } from "./weatherStations.js";
 import {
   fetchPolymarketWeatherMarkets,
+  resolvedYesFromOutcomeTokens,
   type WeatherMarketCandidate,
   type WeatherMarketGroup,
   type WeatherMeasure,
@@ -107,6 +108,7 @@ export interface WeatherMarketSnapshotRecord {
   bestAsk?: number;
   liquidity?: number;
   volume?: number;
+  resolvedYes?: boolean;
   outcome: {
     kind: WeatherOutcomeKind;
     label: string;
@@ -205,9 +207,19 @@ export interface WeatherResolutionOutcomeRecord {
   outcomeLabel: string;
   lowerTempC?: number;
   upperTempC?: number;
+  polymarketYes?: boolean;
   resolutionYes?: boolean;
   wundergroundYes?: boolean;
   metarYes?: boolean;
+}
+
+export interface WeatherResolutionAgreement {
+  resolutionChecked: number;
+  resolutionMismatches: number;
+  wundergroundChecked: number;
+  wundergroundMismatches: number;
+  metarChecked: number;
+  metarMismatches: number;
 }
 
 export interface WeatherResolutionActualRecord {
@@ -243,6 +255,7 @@ export interface WeatherResolutionActualRecord {
     deltaMetarMinusResolution?: number;
     deltaMetarMinusWunderground?: number;
   };
+  officialAgreement?: WeatherResolutionAgreement;
   outcomes: WeatherResolutionOutcomeRecord[];
   warnings: string[];
   errors: string[];
@@ -267,6 +280,8 @@ export interface CollectWeatherMarketSnapshotsOptions {
   limit?: number;
   maxPages?: number;
   includeExpired?: boolean;
+  closed?: boolean;
+  ascending?: boolean;
   path?: string;
   capturedAt?: string;
 }
@@ -300,6 +315,7 @@ export interface CollectWeatherBacktestRunOptions extends WeatherEdgeReportOptio
 
 export interface CollectWeatherResolutionActualsOptions {
   marketSnapshotCapturedAt?: string;
+  allCaptures?: boolean;
   date?: string;
   path?: string;
   metarHours?: number;
@@ -319,6 +335,11 @@ export interface WeatherDatasetSummary {
   lastRunAt?: string;
   distinctMarkets?: number;
   distinctForecastKeys?: number;
+  officiallyResolvedMarkets?: number;
+  exactResolutionActuals?: number;
+  trustedResolutionActuals?: number;
+  polymarketOutcomeLabels?: number;
+  polymarketResolutionMismatches?: number;
   targetDates?: string[];
   sourceIds?: string[];
   leadDays?: number[];
@@ -529,6 +550,7 @@ export function buildWeatherMarketSnapshotRecords(
     bestAsk: market.bestAsk,
     liquidity: market.liquidity,
     volume: market.volume,
+    resolvedYes: market.resolvedYes,
     outcome: {
       kind: market.parsed.outcome.kind,
       label: market.parsed.outcome.label,
@@ -560,6 +582,7 @@ function marketSnapshotToCandidate(record: WeatherMarketSnapshotRecord): Weather
     bestAsk: record.bestAsk,
     liquidity: record.liquidity,
     volume: record.volume,
+    resolvedYes: record.resolvedYes ?? (record.closed ? resolvedYesFromOutcomeTokens(record.tokens) : undefined),
     outcomes: record.tokens,
     parsed: {
       city: record.city,
@@ -846,7 +869,9 @@ export async function collectWeatherMarketSnapshotsDataset(
   const groups = await fetchPolymarketWeatherMarkets(config, {
     limit: options.limit,
     maxPages: options.maxPages,
-    includeExpired: options.includeExpired
+    includeExpired: options.includeExpired,
+    closed: options.closed,
+    ascending: options.ascending
   });
   const selectedGroups = targetDate ? filterWeatherGroupsForDate(groups, targetDate) : groups;
   const records = buildWeatherMarketSnapshotRecords(
@@ -1121,16 +1146,63 @@ function resolutionOutcomeRecords(
   wundergroundExtremeC: number | undefined,
   metarExtremeC: number | undefined
 ): WeatherResolutionOutcomeRecord[] {
-  return group.markets.map((market) => ({
+  const marketsBySlug = new Map<string, WeatherMarketCandidate>();
+  for (const market of group.markets) {
+    const existing = marketsBySlug.get(market.marketSlug);
+    if (
+      !existing ||
+      (existing.resolvedYes === undefined && market.resolvedYes !== undefined) ||
+      (!existing.closed && market.closed)
+    ) {
+      marketsBySlug.set(market.marketSlug, market);
+    }
+  }
+
+  return [...marketsBySlug.values()].map((market) => ({
     marketSlug: market.marketSlug,
     question: market.question,
     outcomeLabel: market.parsed.outcome.label,
     lowerTempC: market.parsed.outcome.lowerTempC,
     upperTempC: market.parsed.outcome.upperTempC,
+    polymarketYes: market.resolvedYes,
     resolutionYes: outcomeContainsExtreme(market.parsed.outcome, resolutionExtremeC),
     wundergroundYes: outcomeContainsExtreme(market.parsed.outcome, wundergroundExtremeC),
     metarYes: outcomeContainsExtreme(market.parsed.outcome, metarExtremeC)
   }));
+}
+
+function agreementForField(
+  outcomes: WeatherResolutionOutcomeRecord[],
+  field: "resolutionYes" | "wundergroundYes" | "metarYes"
+): { checked: number; mismatches: number } {
+  const checked = outcomes.filter((outcome) =>
+    typeof outcome.polymarketYes === "boolean" && typeof outcome[field] === "boolean"
+  );
+  return {
+    checked: checked.length,
+    mismatches: checked.filter((outcome) => outcome.polymarketYes !== outcome[field]).length
+  };
+}
+
+export function weatherResolutionOfficialAgreement(
+  outcomes: WeatherResolutionOutcomeRecord[]
+): WeatherResolutionAgreement {
+  const resolution = agreementForField(outcomes, "resolutionYes");
+  const wunderground = agreementForField(outcomes, "wundergroundYes");
+  const metar = agreementForField(outcomes, "metarYes");
+  return {
+    resolutionChecked: resolution.checked,
+    resolutionMismatches: resolution.mismatches,
+    wundergroundChecked: wunderground.checked,
+    wundergroundMismatches: wunderground.mismatches,
+    metarChecked: metar.checked,
+    metarMismatches: metar.mismatches
+  };
+}
+
+export function weatherResolutionActualMatchesOfficial(record: Pick<WeatherResolutionActualRecord, "outcomes">): boolean {
+  const agreement = weatherResolutionOfficialAgreement(record.outcomes ?? []);
+  return agreement.resolutionChecked === 0 || agreement.resolutionMismatches === 0;
 }
 
 function resolutionTimezone(
@@ -1230,6 +1302,19 @@ async function buildWeatherResolutionActualRecord(
     warnings.push(`METAR ${group.measure} differs from exact resolution source by ${(deltaMetarMinusResolution * 9 / 5).toFixed(1)}F.`);
   }
 
+  const outcomes = resolutionOutcomeRecords(group, resolutionExtremeC, wundergroundExtremeC, metarExtremeC);
+  const officialAgreement = weatherResolutionOfficialAgreement(outcomes);
+  if (officialAgreement.resolutionMismatches > 0) {
+    warnings.push(
+      `Polymarket official outcomes disagree with exact resolution source for ${officialAgreement.resolutionMismatches}/${officialAgreement.resolutionChecked} buckets.`
+    );
+  }
+  if (officialAgreement.wundergroundMismatches > 0) {
+    warnings.push(
+      `Polymarket official outcomes disagree with Wunderground feed for ${officialAgreement.wundergroundMismatches}/${officialAgreement.wundergroundChecked} buckets.`
+    );
+  }
+
   return {
     id: stableId("weather_resolution_actual", {
       marketSnapshotCapturedAt,
@@ -1270,7 +1355,8 @@ async function buildWeatherResolutionActualRecord(
       deltaMetarMinusResolution,
       deltaMetarMinusWunderground
     },
-    outcomes: resolutionOutcomeRecords(group, resolutionExtremeC, wundergroundExtremeC, metarExtremeC),
+    officialAgreement,
+    outcomes,
     warnings: [...new Set(warnings)],
     errors
   };
@@ -1294,13 +1380,18 @@ export async function collectWeatherResolutionActualsDataset(
     throw new Error(`No market snapshot records found at ${config.weather.datasets.marketSnapshotsPath}. Run weather:dataset:markets first.`);
   }
 
-  const marketSnapshotCapturedAt = options.marketSnapshotCapturedAt ?? maxString(
-    marketRecords.map((record) => record.capturedAt)
-  );
+  if (options.allCaptures && options.marketSnapshotCapturedAt) {
+    throw new Error("Pass only one of --all-captures or --market-captured-at.");
+  }
+  const marketSnapshotCapturedAt = options.allCaptures
+    ? "all"
+    : options.marketSnapshotCapturedAt ?? maxString(
+      marketRecords.map((record) => record.capturedAt)
+    );
   if (!marketSnapshotCapturedAt) throw new Error("Could not determine latest market snapshot timestamp.");
 
   const selected = marketRecords.filter((record) =>
-    record.capturedAt === marketSnapshotCapturedAt &&
+    (options.allCaptures || record.capturedAt === marketSnapshotCapturedAt) &&
     (options.date === undefined || record.date === options.date)
   );
   const groups = marketSnapshotGroups(selected).slice(0, options.maxGroups);
@@ -1377,6 +1468,9 @@ async function summarizeMarketSnapshotDataset(path: string): Promise<WeatherData
   const records = await readJsonlRecords<Partial<WeatherMarketSnapshotRecord>>(path);
   const capturedAt = records.flatMap((record) => typeof record.capturedAt === "string" ? [record.capturedAt] : []);
   const markets = new Set(records.flatMap((record) => typeof record.marketSlug === "string" ? [record.marketSlug] : []));
+  const resolvedMarkets = new Set(records.flatMap((record) =>
+    typeof record.marketSlug === "string" && typeof record.resolvedYes === "boolean" ? [record.marketSlug] : []
+  ));
   const targetDates = uniqueSorted(records.flatMap((record) => typeof record.date === "string" ? [record.date] : []));
   return {
     path,
@@ -1384,6 +1478,7 @@ async function summarizeMarketSnapshotDataset(path: string): Promise<WeatherData
     firstCapturedAt: minString(capturedAt),
     lastCapturedAt: maxString(capturedAt),
     distinctMarkets: markets.size,
+    officiallyResolvedMarkets: resolvedMarkets.size,
     targetDates
   };
 }
@@ -1464,6 +1559,20 @@ async function summarizeResolutionActualsDataset(path: string): Promise<WeatherD
   const fetchedAt = records.flatMap((record) => typeof record.fetchedAt === "string" ? [record.fetchedAt] : []);
   const dates = uniqueSorted(records.flatMap((record) => typeof record.date === "string" ? [record.date] : []));
   const markets = new Set(records.flatMap((record) => typeof record.eventSlug === "string" ? [record.eventSlug] : []));
+  const exactResolutionActuals = records.filter((record) => record.extremeC?.resolution !== undefined).length;
+  const trustedResolutionActuals = records.filter((record) =>
+    record.extremeC?.resolution !== undefined &&
+    Array.isArray(record.outcomes) &&
+    weatherResolutionActualMatchesOfficial({ outcomes: record.outcomes as WeatherResolutionOutcomeRecord[] })
+  ).length;
+  const polymarketOutcomeLabels = records.reduce((sum, record) =>
+    sum + (Array.isArray(record.outcomes)
+      ? record.outcomes.filter((outcome) => typeof outcome.polymarketYes === "boolean").length
+      : 0), 0);
+  const polymarketResolutionMismatches = records.reduce((sum, record) =>
+    sum + (Array.isArray(record.outcomes)
+      ? weatherResolutionOfficialAgreement(record.outcomes as WeatherResolutionOutcomeRecord[]).resolutionMismatches
+      : 0), 0);
   return {
     path,
     count: records.length,
@@ -1472,6 +1581,10 @@ async function summarizeResolutionActualsDataset(path: string): Promise<WeatherD
     firstCapturedAt: minString(fetchedAt),
     lastCapturedAt: maxString(fetchedAt),
     distinctMarkets: markets.size,
+    exactResolutionActuals,
+    trustedResolutionActuals,
+    polymarketOutcomeLabels,
+    polymarketResolutionMismatches,
     targetDates: dates
   };
 }
