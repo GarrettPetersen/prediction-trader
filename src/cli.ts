@@ -1,5 +1,5 @@
 import { inspect } from "node:util";
-import { loadConfig } from "./config.js";
+import { loadConfig, type AppConfig } from "./config.js";
 import { assertCanExecute, assertLiveMutation } from "./safety.js";
 import {
   appendExecutionLedgerRecord,
@@ -8,6 +8,23 @@ import {
   summarizeLedger,
   type LedgerRecord
 } from "./ledger.js";
+import {
+  computeLedgerPnl,
+  markFromPolymarketPosition,
+  markFromVistadexPosition,
+  type LedgerPnlCategory,
+  type LedgerPnlMarkMode,
+  type LedgerPnlPosition,
+  type LedgerPnlReport,
+  type LedgerPnlVenue,
+  type LedgerPositionMark
+} from "./ledgerPnl.js";
+import {
+  computeWeatherTradeAudit,
+  type WeatherTradeAuditBucket,
+  type WeatherTradeAuditPosition,
+  type WeatherTradeAuditReport
+} from "./weatherTradeAudit.js";
 import {
   backfillLedger,
   type LedgerBackfillVenue
@@ -231,6 +248,30 @@ function ledgerBackfillVenueArg(args: Args): LedgerBackfillVenue {
   return portfolioUnlockVenueArg(args);
 }
 
+function ledgerPnlVenueArg(args: Args): LedgerPnlVenue {
+  const venue = stringArg(args, "venue", false) ?? "vistadex";
+  if (venue !== "all" && venue !== "polymarket" && venue !== "vistadex") {
+    throw new Error("--venue must be all, polymarket, or vistadex.");
+  }
+  return venue;
+}
+
+function ledgerPnlCategoryArg(args: Args): LedgerPnlCategory {
+  const category = stringArg(args, "category", false) ?? "all";
+  if (category !== "all" && category !== "weather" && category !== "non-weather") {
+    throw new Error("--category must be all, weather, or non-weather.");
+  }
+  return category;
+}
+
+function ledgerPnlMarkModeArg(args: Args): LedgerPnlMarkMode {
+  const markMode = stringArg(args, "mark", false) ?? "mid";
+  if (markMode !== "mid" && markMode !== "bid") {
+    throw new Error("--mark must be mid or bid.");
+  }
+  return markMode;
+}
+
 function validatePolymarketTicket(ticket: PolymarketOrderTicket): void {
   const isMarketType = ticket.orderType === "FOK" || ticket.orderType === "FAK";
   if (ticket.amountUsd !== undefined && ticket.shares !== undefined) {
@@ -261,6 +302,38 @@ function validateVistadexTicket(ticket: VistadexTradeTicket): void {
   if (ticket.side === "sell" && ticket.shares === undefined) {
     throw new Error("Vistadex sells require --shares.");
   }
+}
+
+async function collectLedgerPnlMarks(
+  config: AppConfig,
+  venue: LedgerPnlVenue,
+  positionLimit: number | undefined
+): Promise<LedgerPositionMark[]> {
+  const marks: LedgerPositionMark[] = [];
+
+  if (venue === "all" || venue === "vistadex") {
+    const snapshot = await getVistadexPositions(config, {
+      limit: positionLimit,
+      includeZero: true
+    });
+    marks.push(...snapshot.positions.flatMap((position) => {
+      const mark = markFromVistadexPosition(position);
+      return mark ? [mark] : [];
+    }));
+  }
+
+  if (venue === "all" || venue === "polymarket") {
+    const snapshot = await getPolymarketPositions(config, {
+      limit: positionLimit,
+      includeZero: true
+    });
+    marks.push(...snapshot.positions.flatMap((position) => {
+      const mark = markFromPolymarketPosition(position);
+      return mark ? [mark] : [];
+    }));
+  }
+
+  return marks;
 }
 
 function print(value: unknown): void {
@@ -307,6 +380,156 @@ function compactLedgerRecord(record: LedgerRecord) {
     market: record.market,
     ids: record.ids,
     notes: record.notes
+  };
+}
+
+function compactLedgerPnlPosition(position: LedgerPnlPosition) {
+  return {
+    venue: position.venue,
+    category: position.category,
+    firstBuyAt: position.firstBuyAt,
+    lastActivityAt: position.lastActivityAt,
+    question: position.market.question,
+    slug: position.market.slug,
+    outcome: position.market.outcome ?? position.market.outcomeIndex,
+    buyUsd: round(position.buyUsd, 2),
+    sellUsd: round(position.sellUsd, 2),
+    redemptionUsd: round(position.redemptionUsd, 2),
+    realizedUsd: round(position.realizedUsd, 2),
+    liveShares: round(position.liveShares, 6),
+    liveMidPrice: round(position.liveMidPrice),
+    liveBidPrice: round(position.liveBidPrice),
+    liveMidValueUsd: round(position.liveMidValueUsd, 2),
+    liveBidValueUsd: round(position.liveBidValueUsd, 2),
+    pnlMidUsd: round(position.pnlMidUsd, 2),
+    pnlBidUsd: round(position.pnlBidUsd, 2),
+    selectedPnlUsd: round(position.selectedPnlUsd, 2),
+    status: position.status
+  };
+}
+
+function compactLedgerPnlReport(report: LedgerPnlReport, args: Args) {
+  const top = Math.max(1, Math.trunc(numberArg(args, "top", false) ?? 10));
+  const losers = report.positions.slice(0, top);
+  const winners = [...report.positions]
+    .sort((a, b) => b.selectedPnlUsd - a.selectedPnlUsd)
+    .slice(0, top);
+
+  return {
+    venue: report.venue,
+    category: report.category,
+    since: report.since,
+    until: report.until,
+    markMode: report.markMode,
+    positionCount: report.positionCount,
+    winnerCount: report.winnerCount,
+    loserCount: report.loserCount,
+    breakEvenCount: report.breakEvenCount,
+    totals: {
+      buyUsd: round(report.totals.buyUsd, 2),
+      sellUsd: round(report.totals.sellUsd, 2),
+      redemptionUsd: round(report.totals.redemptionUsd, 2),
+      realizedUsd: round(report.totals.realizedUsd, 2),
+      liveMidValueUsd: round(report.totals.liveMidValueUsd, 2),
+      liveBidValueUsd: round(report.totals.liveBidValueUsd, 2),
+      pnlMidUsd: round(report.totals.pnlMidUsd, 2),
+      pnlBidUsd: round(report.totals.pnlBidUsd, 2),
+      selectedPnlUsd: round(report.totals.selectedPnlUsd, 2),
+      selectedRoi: round(report.totals.selectedRoi, 4)
+    },
+    bottomPositions: losers.map(compactLedgerPnlPosition),
+    topPositions: winners.map(compactLedgerPnlPosition),
+    omittedPositions: Math.max(0, report.positionCount - top)
+  };
+}
+
+function compactWeatherTradeAuditBucket(bucket: WeatherTradeAuditBucket) {
+  return {
+    key: bucket.key,
+    positionCount: bucket.positionCount,
+    actualBuyUsd: round(bucket.actualBuyUsd, 2),
+    actualPnlUsd: round(bucket.actualSelectedPnlUsd, 2),
+    actualRoi: round(bucket.actualRoi, 4),
+    oppositePnlUsd: round(bucket.oppositeSelectedPnlUsd, 2),
+    oppositeRoi: round(bucket.oppositeRoi, 4),
+    oppositeAdvantageUsd: round(bucket.oppositeAdvantageUsd, 2)
+  };
+}
+
+function compactWeatherTradeAuditPosition(position: WeatherTradeAuditPosition) {
+  return {
+    firstBuyAt: position.firstBuyAt,
+    lastActivityAt: position.lastActivityAt,
+    question: position.market.question,
+    slug: position.market.slug,
+    actualOutcome: position.market.outcome ?? position.market.outcomeIndex,
+    oppositeOutcome: position.oppositeMarket.outcome ?? position.oppositeMarket.outcomeIndex,
+    marketType: position.classification.marketType,
+    city: position.classification.city,
+    date: position.classification.date,
+    buyUsd: round(position.actual.buyUsd, 2),
+    actualPnlUsd: round(position.actual.selectedPnlUsd, 2),
+    actualRoi: round(position.actual.selectedRoi, 4),
+    oppositePnlUsd: round(position.opposite.selectedPnlUsd, 2),
+    oppositeRoi: round(position.opposite.selectedRoi, 4),
+    oppositeAdvantageUsd: round(position.opposite.selectedPnlUsd - position.actual.selectedPnlUsd, 2),
+    actualLiveBidValueUsd: round(position.actual.liveBidValueUsd, 2),
+    oppositeLiveBidValueUsd: round(position.opposite.liveBidValueUsd, 2)
+  };
+}
+
+function compactWeatherTradeAuditReport(report: WeatherTradeAuditReport, args: Args) {
+  const top = Math.max(1, Math.trunc(numberArg(args, "top", false) ?? 10));
+  const worstActual = report.positions.slice(0, top);
+  const bestActual = [...report.positions]
+    .sort((a, b) => b.actual.selectedPnlUsd - a.actual.selectedPnlUsd)
+    .slice(0, top);
+  const bestOpposite = [...report.positions]
+    .sort((a, b) =>
+      (b.opposite.selectedPnlUsd - b.actual.selectedPnlUsd) -
+      (a.opposite.selectedPnlUsd - a.actual.selectedPnlUsd)
+    )
+    .slice(0, top);
+
+  return {
+    venue: report.venue,
+    since: report.since,
+    until: report.until,
+    markMode: report.markMode,
+    positionCount: report.positionCount,
+    excludedPositionCount: report.excludedPositionCount,
+    actual: {
+      buyUsd: round(report.actual.buyUsd, 2),
+      realizedUsd: round(report.actual.realizedUsd, 2),
+      liveBidValueUsd: round(report.actual.liveBidValueUsd, 2),
+      pnlBidUsd: round(report.actual.pnlBidUsd, 2),
+      selectedPnlUsd: round(report.actual.selectedPnlUsd, 2),
+      selectedRoi: round(report.actual.selectedRoi, 4),
+      winnerCount: report.actual.winnerCount,
+      loserCount: report.actual.loserCount
+    },
+    opposite: {
+      buyUsd: round(report.opposite.buyUsd, 2),
+      realizedUsd: round(report.opposite.realizedUsd, 2),
+      liveBidValueUsd: round(report.opposite.liveBidValueUsd, 2),
+      pnlBidUsd: round(report.opposite.pnlBidUsd, 2),
+      selectedPnlUsd: round(report.opposite.selectedPnlUsd, 2),
+      selectedRoi: round(report.opposite.selectedRoi, 4),
+      winnerCount: report.opposite.winnerCount,
+      loserCount: report.opposite.loserCount
+    },
+    oppositeAdvantageUsd: round(report.oppositeAdvantageUsd, 2),
+    buckets: {
+      bySide: report.buckets.bySide.map(compactWeatherTradeAuditBucket),
+      byMarketType: report.buckets.byMarketType.map(compactWeatherTradeAuditBucket),
+      byMarketTypeAndSide: report.buckets.byMarketTypeAndSide.map(compactWeatherTradeAuditBucket)
+    },
+    worstActualPositions: worstActual.map(compactWeatherTradeAuditPosition),
+    bestActualPositions: bestActual.map(compactWeatherTradeAuditPosition),
+    bestOppositeAdvantagePositions: bestOpposite.map(compactWeatherTradeAuditPosition),
+    excludedPositions: report.excludedPositions.slice(0, top),
+    omittedPositions: Math.max(0, report.positionCount - top),
+    omittedExcludedPositions: Math.max(0, report.excludedPositionCount - top)
   };
 }
 
@@ -673,8 +896,11 @@ function compactWeatherBacktestTrade(trade: WeatherBacktestTrade) {
     side: trade.side,
     won: trade.won,
     pnlUsd: round(trade.pnlUsd, 2),
+    oppositePnlUsd: round(trade.oppositePnlUsd, 2),
+    oppositeWon: trade.oppositeWon,
     stakeUsd: round(trade.stakeUsd, 2),
     payoutUsd: round(trade.payoutUsd, 2),
+    oppositePayoutUsd: round(trade.oppositePayoutUsd, 2),
     edge: round(trade.edge),
     fair: round(trade.fair),
     referencePrice: round(trade.referencePrice),
@@ -687,6 +913,7 @@ function compactWeatherBacktestTrade(trade: WeatherBacktestTrade) {
     forecastTargetKey: trade.forecastTargetKey,
     resolutionStationId: trade.resolutionStationId,
     measure: trade.measure,
+    marketType: trade.marketType,
     outcomeLabel: trade.outcomeLabel,
     actualC: round(trade.actualC, 2),
     resolvedYes: trade.resolvedYes,
@@ -1096,6 +1323,8 @@ Commands:
   ledger:list [--ledger PATH] [--venue polymarket|vistadex] [--source execution|backfill] [--action ACTION] [--limit N]
   ledger:summary [--ledger PATH]
   ledger:update [--ledger PATH] [--venue all|polymarket|vistadex] [--limit N] [--max-pages N] [--no-positions] [--no-fills] [--no-cash]
+  ledger:pnl [--ledger PATH] [--venue all|polymarket|vistadex] [--category all|weather|non-weather] [--since ISO] [--until ISO] [--mark mid|bid] [--include-sell-only] [--no-live-marks] [--top N]
+  weather:trade-audit [--ledger PATH] [--venue all|polymarket|vistadex] [--since ISO] [--until ISO] [--mark mid|bid] [--no-live-marks] [--limit N] [--top N] [--raw]
   ledger:backfill [--ledger PATH] [--venue all|polymarket|vistadex] [--no-positions] [--no-fills] [--polymarket-first-page]
   weather:sources (--city CITY [--country CODE] | --latitude N --longitude N) [--days N] [--sources all|openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko,noaa_ncei] [--ncei-location ID | --ncei-station ID] [--history-date YYYY-MM-DD] [--raw]
   weather:scan [--limit N] [--max-pages N] [--include-expired] [--include-unparsed]
@@ -1107,7 +1336,7 @@ Commands:
   weather:backtest --city CITY [--country CODE] --date YYYY-MM-DD [--measure temperature_high|temperature_low] [--years N] [--threshold N]
   weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--sizing independent-kelly|city-portfolio] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--max-group-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--entry-mode event-end-minus-lead|cron-entry-window] [--entry-start-local-time HH:MM] [--entry-end-local-time HH:MM] [--cron-interval-hours N] [--cron-minute N] [--fill-slippage N] [--min-executable-edge N]
   weather:resolution-audit [--date YYYY-MM-DD | --days-ahead N] [--status active|closed] [--distance-ok-km N] [--distance-warn-km N] [--top N]
-  weather:reinvest [--execute] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--min-edge N] [--min-cash-to-reinvest N] [--target-cash-reserve N] [--min-confidence low|medium|high] [--no-calibration] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--entry-start-local-time HH:MM] [--entry-end-local-time HH:MM] [--report-path PATH]
+  weather:reinvest [--execute] [--pause-buys] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--min-edge N] [--min-cash-to-reinvest N] [--target-cash-reserve N] [--min-confidence low|medium|high] [--require-recent-audit-positive] [--audit-lookback-hours N] [--audit-min-positions N] [--no-calibration] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--entry-start-local-time HH:MM] [--entry-end-local-time HH:MM] [--report-path PATH]
   weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N]
   weather:dataset:observations (--city CITY [--country CODE] | --latitude N --longitude N) --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--ncei-station ID | --ncei-location ID] [--path PATH]
   weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--closed] [--descending] [--path PATH]
@@ -1159,6 +1388,40 @@ async function run(): Promise<void> {
 
   if (command === "ledger:summary") {
     print(summarizeLedger(await readLedgerRecords(ledgerPath), ledgerPath));
+    return;
+  }
+
+  if (command === "ledger:pnl") {
+    const venue = ledgerPnlVenueArg(args);
+    const liveMarks = args["no-live-marks"] !== true
+      ? await collectLedgerPnlMarks(config, venue, numberArg(args, "limit", false))
+      : [];
+    const report = computeLedgerPnl(await readLedgerRecords(ledgerPath), {
+      venue,
+      category: ledgerPnlCategoryArg(args),
+      since: stringArg(args, "since", false),
+      until: stringArg(args, "until", false),
+      includeSellOnly: args["include-sell-only"] === true,
+      markMode: ledgerPnlMarkModeArg(args),
+      marks: liveMarks
+    });
+    print(args.raw === true ? report : compactLedgerPnlReport(report, args));
+    return;
+  }
+
+  if (command === "weather:trade-audit") {
+    const venue = ledgerPnlVenueArg(args);
+    const liveMarks = args["no-live-marks"] !== true
+      ? await collectLedgerPnlMarks(config, venue, numberArg(args, "limit", false))
+      : [];
+    const report = computeWeatherTradeAudit(await readLedgerRecords(ledgerPath), {
+      venue,
+      since: stringArg(args, "since", false),
+      until: stringArg(args, "until", false),
+      markMode: ledgerPnlMarkModeArg(args),
+      marks: liveMarks
+    });
+    print(args.raw === true ? report : compactWeatherTradeAuditReport(report, args));
     return;
   }
 
@@ -1424,6 +1687,38 @@ async function run(): Promise<void> {
           brierScore: report.summary.brierScore === undefined ? undefined : round(report.summary.brierScore, 4),
           candidateBrierScore: report.summary.candidateBrierScore === undefined ? undefined : round(report.summary.candidateBrierScore, 4)
         },
+        oppositeSummary: {
+          ...report.oppositeSummary,
+          stakeUsd: round(report.oppositeSummary.stakeUsd, 2),
+          payoutUsd: round(report.oppositeSummary.payoutUsd, 2),
+          pnlUsd: round(report.oppositeSummary.pnlUsd, 2),
+          roi: round(report.oppositeSummary.roi, 4)
+        },
+        probabilityCalibration: {
+          allMarkets: report.probabilityCalibration.allMarkets.map((bucket) => ({
+            ...bucket,
+            averageProbability: round(bucket.averageProbability, 4),
+            actualRate: round(bucket.actualRate, 4),
+            brierScore: round(bucket.brierScore, 4)
+          })),
+          candidates: report.probabilityCalibration.candidates.map((bucket) => ({
+            ...bucket,
+            averageProbability: round(bucket.averageProbability, 4),
+            actualRate: round(bucket.actualRate, 4),
+            brierScore: round(bucket.brierScore, 4)
+          }))
+        },
+        breakdowns: Object.fromEntries(Object.entries(report.breakdowns).map(([key, rows]) => [
+          key,
+          rows.map((row) => ({
+            ...row,
+            stakeUsd: round(row.stakeUsd, 2),
+            pnlUsd: round(row.pnlUsd, 2),
+            roi: round(row.roi, 4),
+            oppositePnlUsd: round(row.oppositePnlUsd, 2),
+            oppositeRoi: round(row.oppositeRoi, 4)
+          }))
+        ])),
         displayedTrades: Math.min(top, report.trades.length),
         omittedTrades: Math.max(0, report.trades.length - top),
         trades: report.trades.slice(0, top).map(compactWeatherBacktestTrade)
@@ -1495,8 +1790,12 @@ async function run(): Promise<void> {
       minConfidence: weatherReinvestConfidenceArg(args),
       buyMinExecutableEdge: numberArg(args, "buy-min-executable-edge", false),
       buyQuoteDriftUsd: numberArg(args, "buy-quote-drift", false),
+      pauseBuys: args["pause-buys"] === true,
       entryStartLocalMinutes: localTimeMinutesArg(args, "entry-start-local-time"),
-      entryEndLocalMinutes: localTimeMinutesArg(args, "entry-end-local-time")
+      entryEndLocalMinutes: localTimeMinutesArg(args, "entry-end-local-time"),
+      requireRecentAuditPositive: args["require-recent-audit-positive"] === true,
+      auditLookbackHours: numberArg(args, "audit-lookback-hours", false),
+      auditMinPositions: numberArg(args, "audit-min-positions", false)
     });
     const reportPath = stringArg(args, "report-path", false);
     if (reportPath) await writeWeatherReinvestReport(reportPath, report);

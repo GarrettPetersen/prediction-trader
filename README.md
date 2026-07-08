@@ -503,6 +503,10 @@ npm run weather:reinvest -- \
   --min-cash-to-reinvest 5 \
   --target-cash-reserve 20 \
   --min-confidence medium \
+  --pause-buys \
+  --require-recent-audit-positive \
+  --audit-lookback-hours 72 \
+  --audit-min-positions 5 \
   --entry-start-local-time 20:00 \
   --entry-end-local-time 23:30 \
   --report-path data/trades/weatheredge-report.json
@@ -517,6 +521,13 @@ window is `20:00-23:30` on the local calendar day before the target date. Cash
 freed outside that window is held until a later scheduled run. The loop does
 not touch Polymarket. Add `--execute` only after `PREDICTION_TRADER_LIVE=1` is
 set and the dry-run report looks sane.
+
+`--pause-buys` leaves the sell side active, so locked weather positions can
+still be liquidated, but it skips the fresh market/forecast scan and opens no
+new positions. Use it while comparing strategy variants or after a bad run. The
+recent-audit gate compares our WeatherEdge ledger performance with a same-dollar
+opposite-side portfolio; when enabled, it blocks new buys unless the recent
+sample is large enough, non-negative, and beating the inverse.
 
 Live WeatherEdge pricing uses calibrated previous-run residuals by default.
 Every buy row in `weatheredge-report.json` includes `modelMode`,
@@ -570,6 +581,10 @@ WEATHEREDGE_MIN_EDGE=0.20
 WEATHEREDGE_MIN_CONFIDENCE=medium
 WEATHEREDGE_MIN_CASH_TO_REINVEST=5
 WEATHEREDGE_TARGET_CASH_RESERVE=20
+WEATHEREDGE_PAUSE_BUYS=true
+WEATHEREDGE_REQUIRE_RECENT_AUDIT_POSITIVE=true
+WEATHEREDGE_AUDIT_LOOKBACK_HOURS=72
+WEATHEREDGE_AUDIT_MIN_POSITIONS=5
 WEATHEREDGE_ENTRY_START_LOCAL_TIME=20:00
 WEATHEREDGE_ENTRY_END_LOCAL_TIME=23:30
 WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS=
@@ -586,6 +601,12 @@ The scheduled reinvestment loop has no `WEATHEREDGE_SKIP_CALIBRATION` escape
 hatch. If calibration datasets are missing, unreadable, or unable to produce
 historical-residual pricing, the run fails or skips buys instead of falling back
 to heuristic pricing.
+
+Fresh buys are paused by default with `WEATHEREDGE_PAUSE_BUYS=true`. While this
+is set, the schedule may still quote and sell weather positions that are
+effectively locked, but it will not open new weather positions. Set it to
+`false` only after the latest backtest and ledger audit both support turning the
+strategy back on.
 
 The workflow sets `TZ=America/Vancouver`, so `--days-ahead 1` means tomorrow
 from British Columbia rather than UTC. Candidate buys are still gated by the
@@ -822,6 +843,27 @@ backtest still infers NO prices as `1 - YES` before slippage and does not yet
 model full order-book depth, fees, or liquidity caps. Use `--min-trade-price`
 to exclude very cheap contracts while we are still using price-history fills
 instead of full order-book simulation.
+
+The market backtest also reports an `oppositeSummary`. That is the same set of
+forecast-edge candidates and the same dollar sizing, but with the opposite side
+bought at its own adverse-slippage entry price. This is the "market-informed
+inverse" check: if our apparent model edge is really hidden market information
+against us, the opposite portfolio should outperform. Treat this as an audit
+comparison, not a second live strategy switch. After fixing symmetric slippage,
+the July 4-7 cron-entry backtest favored the normal forecast-edge strategy:
+
+```text
+Date        Forecast-edge PnL   Inverse PnL
+2026-07-04           -3.69          +7.19
+2026-07-05          +28.76         -49.32
+2026-07-06          +25.09         -14.09
+2026-07-07          -17.54         +10.54
+Total               +32.62         -45.68
+```
+
+That is still a small sample, but it argues against blindly inverting the model
+right now. Keep live buys paused until the ledger audit and a larger
+out-of-sample backtest agree that the strategy should be re-enabled.
 
 The market backtest calibrates the forecast before pricing bins:
 
@@ -1424,6 +1466,41 @@ npm run ledger:list -- --limit 20
 npm run ledger:list -- --venue polymarket --action fill
 npm run ledger:list -- --limit 5 --raw
 ```
+
+Compute realized plus unrealized PnL from the ledger:
+
+```bash
+npm run ledger:pnl -- --venue vistadex --category weather
+npm run ledger:pnl -- \
+  --venue vistadex \
+  --category weather \
+  --since 2026-07-07T17:47:04.000Z \
+  --mark bid
+```
+
+`ledger:pnl` groups buys, sells, and redemptions by venue market/outcome. Buys
+are cost, sells and redemptions are realized proceeds, and current open shares
+are marked from live venue positions unless you pass `--no-live-marks`. The
+default mark is midpoint; pass `--mark bid` to value open positions at
+executable bid where available. Sell-only rows are excluded by default so
+liquidating pre-filter positions does not inflate a filtered strategy cohort;
+pass `--include-sell-only` when auditing liquidation cash flow itself.
+
+Compare WeatherEdge trades against a same-dollar opposite-side portfolio:
+
+```bash
+npm run weather:trade-audit -- \
+  --venue vistadex \
+  --since 2026-07-05T00:00:00.000Z \
+  --mark bid
+```
+
+`weather:trade-audit` is the ledger-level version of the inverse-model check.
+It groups weather fills by market/outcome, reconstructs realized and open PnL,
+then estimates what would have happened if every included buy had bought the
+other side of the same binary instead. Open positions require live marks unless
+you pass `--no-live-marks`; missing or malformed trade prices fail the audit
+rather than being guessed.
 
 Use `--ledger PATH` with any ledger command or execution command if you want a
 separate audit file for a run. `ledger:list` prints compact rows by default;

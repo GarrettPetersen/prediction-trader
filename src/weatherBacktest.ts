@@ -104,6 +104,7 @@ export interface WeatherBacktestTrade {
   date: string;
   measure: WeatherMeasure;
   outcomeLabel: string;
+  marketType: string;
   side: "YES" | "NO";
   referencePrice: number;
   price: number;
@@ -123,6 +124,10 @@ export interface WeatherBacktestTrade {
   stakeUsd: number;
   payoutUsd: number;
   pnlUsd: number;
+  oppositePrice: number;
+  oppositeWon: boolean;
+  oppositePayoutUsd: number;
+  oppositePnlUsd: number;
   decisionTime: string;
   entryMode: WeatherBacktestEntryMode;
   entryTimezone?: string;
@@ -156,6 +161,23 @@ export interface WeatherMarketBacktestReport {
     brierScore?: number;
     candidateBrierScore?: number;
   };
+  oppositeSummary: {
+    wins: number;
+    losses: number;
+    stakeUsd: number;
+    payoutUsd: number;
+    pnlUsd: number;
+    roi: number;
+  };
+  probabilityCalibration: {
+    allMarkets: WeatherProbabilityCalibrationBucket[];
+    candidates: WeatherProbabilityCalibrationBucket[];
+  };
+  breakdowns: {
+    bySide: WeatherBacktestBreakdown[];
+    byMarketType: WeatherBacktestBreakdown[];
+    byMarketTypeAndSide: WeatherBacktestBreakdown[];
+  };
   sizing: {
     method: WeatherBacktestSizingStrategy;
     kellyMultiplier: number;
@@ -175,6 +197,24 @@ export interface WeatherMarketBacktestReport {
     entryEndLocalMinutes?: number;
   };
   trades: WeatherBacktestTrade[];
+}
+
+export interface WeatherProbabilityCalibrationBucket {
+  bucket: string;
+  count: number;
+  averageProbability: number;
+  actualRate: number;
+  brierScore: number;
+}
+
+export interface WeatherBacktestBreakdown {
+  key: string;
+  tradeCount: number;
+  stakeUsd: number;
+  pnlUsd: number;
+  roi: number | undefined;
+  oppositePnlUsd: number;
+  oppositeRoi: number | undefined;
 }
 
 interface ClosedWeatherMarket {
@@ -211,10 +251,23 @@ interface BacktestDecisionTime {
 
 interface BacktestSizingCandidate extends Omit<
   WeatherBacktestTrade,
-  "fullKellyFraction" | "kellyFraction" | "rawStakeUsd" | "stakeUsd" | "payoutUsd" | "pnlUsd"
+  | "fullKellyFraction"
+  | "kellyFraction"
+  | "rawStakeUsd"
+  | "stakeUsd"
+  | "payoutUsd"
+  | "pnlUsd"
+  | "oppositeWon"
+  | "oppositePayoutUsd"
+  | "oppositePnlUsd"
 > {
   lowerTempC?: number;
   upperTempC?: number;
+}
+
+interface ProbabilityScore {
+  probability: number;
+  actual: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -492,6 +545,74 @@ function brierScore(items: Array<{ probability: number; actual: boolean }>): num
   return mean(items.map((item) => (item.probability - (item.actual ? 1 : 0)) ** 2));
 }
 
+function marketType(parsed: ParsedWeatherMarket): string {
+  return `${parsed.measure}:${parsed.outcome.kind}:${parsed.outcome.unit}`;
+}
+
+function probabilityBucket(probability: number): string {
+  const lower = Math.min(0.9, Math.max(0, Math.floor(probability * 10) / 10));
+  const upper = lower + 0.1;
+  return `${lower.toFixed(1)}-${upper.toFixed(1)}`;
+}
+
+function probabilityCalibrationBuckets(items: ProbabilityScore[]): WeatherProbabilityCalibrationBucket[] {
+  const buckets = new Map<string, ProbabilityScore[]>();
+  for (const item of items) {
+    const key = probabilityBucket(item.probability);
+    const bucket = buckets.get(key) ?? [];
+    bucket.push(item);
+    buckets.set(key, bucket);
+  }
+
+  return [...buckets.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([bucket, scores]) => ({
+      bucket,
+      count: scores.length,
+      averageProbability: mean(scores.map((score) => score.probability)),
+      actualRate: scores.filter((score) => score.actual).length / scores.length,
+      brierScore: brierScore(scores) ?? 0
+    }));
+}
+
+export function oppositeWeatherBacktestEntryPrice(input: {
+  side: "YES" | "NO";
+  yesPrice: number;
+  noPrice: number;
+}): number {
+  return input.side === "YES" ? input.noPrice : input.yesPrice;
+}
+
+function tradeBreakdowns(
+  trades: WeatherBacktestTrade[],
+  keyForTrade: (trade: WeatherBacktestTrade) => string
+): WeatherBacktestBreakdown[] {
+  const buckets = new Map<string, WeatherBacktestTrade[]>();
+  for (const trade of trades) {
+    const key = keyForTrade(trade);
+    const bucket = buckets.get(key) ?? [];
+    bucket.push(trade);
+    buckets.set(key, bucket);
+  }
+
+  return [...buckets.entries()]
+    .map(([key, bucket]) => {
+      const stakeUsd = bucket.reduce((sum, trade) => sum + trade.stakeUsd, 0);
+      const pnlUsd = bucket.reduce((sum, trade) => sum + trade.pnlUsd, 0);
+      const oppositePnlUsd = bucket.reduce((sum, trade) => sum + trade.oppositePnlUsd, 0);
+      return {
+        key,
+        tradeCount: bucket.length,
+        stakeUsd,
+        pnlUsd,
+        roi: stakeUsd > 0 ? pnlUsd / stakeUsd : undefined,
+        oppositePnlUsd,
+        oppositeRoi: stakeUsd > 0 ? oppositePnlUsd / stakeUsd : undefined
+      };
+    })
+    .sort((a, b) => a.pnlUsd - b.pnlUsd);
+}
+
 async function mapWithConcurrency<T, U>(
   items: T[],
   concurrency: number,
@@ -565,8 +686,8 @@ export async function runWeatherMarketBacktest(
   });
   const forecastIndex = buildCalibratedForecastIndex(forecastValuesByKey, calibration);
   const candidates: BacktestSizingCandidate[] = [];
-  const scoredMarkets: Array<{ probability: number; actual: boolean }> = [];
-  const candidateScores: Array<{ probability: number; actual: boolean }> = [];
+  const scoredMarkets: ProbabilityScore[] = [];
+  const candidateScores: ProbabilityScore[] = [];
 
   let skippedNoForecast = 0;
   let skippedNoActual = 0;
@@ -651,6 +772,7 @@ export async function runWeatherMarketBacktest(
     const proxyActualYes = actualC === undefined ? undefined : marketResolvesYes(parsed, actualC);
     scoredMarkets.push({ probability: fairYes, actual: resolvedYes });
     const price = side === "YES" ? yesPrice : noPrice;
+    const inversePrice = oppositeWeatherBacktestEntryPrice({ side, yesPrice, noPrice });
     if (edge < minEdge || edge < minExecutableEdge || price < minTradePrice) continue;
 
     const won = side === "YES" ? resolvedYes : !resolvedYes;
@@ -667,9 +789,11 @@ export async function runWeatherMarketBacktest(
       date: parsed.date,
       measure: parsed.measure,
       outcomeLabel: parsed.outcome.label,
+      marketType: marketType(parsed),
       side,
       referencePrice: side === "YES" ? referenceYesPrice : 1 - referenceYesPrice,
       price,
+      oppositePrice: inversePrice,
       fillSlippage,
       fair,
       edge,
@@ -777,6 +901,8 @@ export async function runWeatherMarketBacktest(
     const sizing = sizes[index];
     const stakeUsd = sizing?.stakeUsd ?? 0;
     const payoutUsd = trade.won ? stakeUsd / trade.price : 0;
+    const oppositeWon = !trade.won;
+    const oppositePayoutUsd = oppositeWon ? stakeUsd / trade.oppositePrice : 0;
     return {
       ...trade,
       fullKellyFraction: sizing?.fullKellyFraction ?? 0,
@@ -784,13 +910,18 @@ export async function runWeatherMarketBacktest(
       rawStakeUsd: sizing?.rawStakeUsd ?? 0,
       stakeUsd,
       payoutUsd,
-      pnlUsd: payoutUsd - stakeUsd
+      pnlUsd: payoutUsd - stakeUsd,
+      oppositeWon,
+      oppositePayoutUsd,
+      oppositePnlUsd: oppositePayoutUsd - stakeUsd
     };
   }).filter((trade) => trade.stakeUsd > 0)
     .sort((a, b) => b.edge - a.edge);
   const payoutUsd = trades.reduce((sum, trade) => sum + trade.payoutUsd, 0);
   const totalStakeUsd = trades.reduce((sum, trade) => sum + trade.stakeUsd, 0);
   const pnlUsd = payoutUsd - totalStakeUsd;
+  const oppositePayoutUsd = trades.reduce((sum, trade) => sum + trade.oppositePayoutUsd, 0);
+  const oppositePnlUsd = oppositePayoutUsd - totalStakeUsd;
 
   return {
     date: options.date,
@@ -819,6 +950,23 @@ export async function runWeatherMarketBacktest(
       roi: bankrollUsd > 0 ? pnlUsd / bankrollUsd : 0,
       brierScore: brierScore(scoredMarkets),
       candidateBrierScore: brierScore(candidateScores)
+    },
+    oppositeSummary: {
+      wins: trades.filter((trade) => trade.oppositeWon).length,
+      losses: trades.filter((trade) => !trade.oppositeWon).length,
+      stakeUsd: totalStakeUsd,
+      payoutUsd: oppositePayoutUsd,
+      pnlUsd: oppositePnlUsd,
+      roi: bankrollUsd > 0 ? oppositePnlUsd / bankrollUsd : 0
+    },
+    probabilityCalibration: {
+      allMarkets: probabilityCalibrationBuckets(scoredMarkets),
+      candidates: probabilityCalibrationBuckets(candidateScores)
+    },
+    breakdowns: {
+      bySide: tradeBreakdowns(trades, (trade) => trade.side),
+      byMarketType: tradeBreakdowns(trades, (trade) => trade.marketType),
+      byMarketTypeAndSide: tradeBreakdowns(trades, (trade) => `${trade.marketType}|${trade.side}`)
     },
     sizing: {
       method: sizingStrategy,

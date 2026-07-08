@@ -3,8 +3,12 @@ import { dirname } from "node:path";
 import type { AppConfig } from "./config.js";
 import {
   appendExecutionLedgerRecord,
+  readLedgerRecords,
   type AppendLedgerResult
 } from "./ledger.js";
+import {
+  markFromVistadexPosition
+} from "./ledgerPnl.js";
 import {
   executeVistadexTrade,
   getVistadexEvent,
@@ -23,6 +27,10 @@ import {
   type WeatherEdgeRow,
   type WeatherEdgeReportOptions
 } from "./weatherEdges.js";
+import {
+  computeWeatherTradeAudit,
+  type WeatherTradeAuditReport
+} from "./weatherTradeAudit.js";
 import { parseWeatherMarketQuestion } from "./weatherMarkets.js";
 import { resolutionSourceFromText } from "./weatherStations.js";
 import {
@@ -69,8 +77,12 @@ export interface WeatherReinvestOptions extends Pick<
   minConfidence?: WeatherReinvestConfidence;
   buyMinExecutableEdge?: number;
   buyQuoteDriftUsd?: number;
+  pauseBuys?: boolean;
   entryStartLocalMinutes?: number;
   entryEndLocalMinutes?: number;
+  requireRecentAuditPositive?: boolean;
+  auditLookbackHours?: number;
+  auditMinPositions?: number;
   now?: Date;
 }
 
@@ -115,6 +127,7 @@ export interface WeatherReinvestTradeResult {
 
 export interface WeatherReinvestReport {
   execute: boolean;
+  pauseBuys: boolean;
   startedAt: string;
   finishedAt: string;
   ledgerPath: string;
@@ -133,6 +146,7 @@ export interface WeatherReinvestReport {
   sold: WeatherReinvestTradeResult[];
   bought: WeatherReinvestTradeResult[];
   skipped: WeatherReinvestTradeResult[];
+  auditGate?: WeatherReinvestAuditGate;
   warnings: string[];
 }
 
@@ -143,6 +157,19 @@ export interface WeatherReinvestStateSummary {
   markedPositionValueUsd: number;
   markedWeatherValueUsd: number;
   computedBankrollUsd: number;
+}
+
+export interface WeatherReinvestAuditGate {
+  enabled: boolean;
+  passed: boolean;
+  since: string;
+  lookbackHours: number;
+  minPositions: number;
+  positionCount: number;
+  actualPnlUsd: number;
+  oppositePnlUsd: number;
+  oppositeAdvantageUsd: number;
+  reason: string;
 }
 
 interface VistadexMarketReference {
@@ -297,6 +324,70 @@ function emptyWeatherEdgeSummary(): WeatherEdgeSummary {
     signalCount: 0,
     errors: []
   };
+}
+
+export function evaluateReinvestAuditGate(input: {
+  report: {
+    positionCount: number;
+    actual: Pick<WeatherTradeAuditReport["actual"], "selectedPnlUsd">;
+    opposite: Pick<WeatherTradeAuditReport["opposite"], "selectedPnlUsd">;
+    oppositeAdvantageUsd: number;
+  };
+  since: string;
+  lookbackHours: number;
+  minPositions: number;
+}): WeatherReinvestAuditGate {
+  const actualPnlUsd = input.report.actual.selectedPnlUsd;
+  const oppositePnlUsd = input.report.opposite.selectedPnlUsd;
+  const enoughPositions = input.report.positionCount >= input.minPositions;
+  const actualOutperformedOpposite = actualPnlUsd >= oppositePnlUsd;
+  const actualNonNegative = actualPnlUsd >= 0;
+  const passed = enoughPositions && actualOutperformedOpposite && actualNonNegative;
+  const reason = !enoughPositions
+    ? `Only ${input.report.positionCount} audited WeatherEdge positions since ${input.since}; need at least ${input.minPositions}.`
+    : !actualNonNegative
+      ? `Recent WeatherEdge PnL is negative (${actualPnlUsd.toFixed(2)}).`
+      : !actualOutperformedOpposite
+        ? `Recent WeatherEdge PnL (${actualPnlUsd.toFixed(2)}) trails market-informed opposite PnL (${oppositePnlUsd.toFixed(2)}).`
+        : `Recent WeatherEdge PnL (${actualPnlUsd.toFixed(2)}) is non-negative and beats market-informed opposite PnL (${oppositePnlUsd.toFixed(2)}).`;
+
+  return {
+    enabled: true,
+    passed,
+    since: input.since,
+    lookbackHours: input.lookbackHours,
+    minPositions: input.minPositions,
+    positionCount: input.report.positionCount,
+    actualPnlUsd,
+    oppositePnlUsd,
+    oppositeAdvantageUsd: input.report.oppositeAdvantageUsd,
+    reason
+  };
+}
+
+async function assessRecentAuditGate(
+  ledgerPath: string,
+  positions: VistadexPosition[],
+  options: Required<Pick<WeatherReinvestOptions, "auditLookbackHours" | "auditMinPositions">> & Pick<WeatherReinvestOptions, "now">
+): Promise<WeatherReinvestAuditGate> {
+  const now = options.now ?? new Date();
+  const since = new Date(now.getTime() - options.auditLookbackHours * 3_600_000).toISOString();
+  const marks = positions.flatMap((position) => {
+    const mark = markFromVistadexPosition(position);
+    return mark ? [mark] : [];
+  });
+  const report = computeWeatherTradeAudit(await readLedgerRecords(ledgerPath), {
+    venue: "vistadex",
+    since,
+    markMode: "bid",
+    marks
+  });
+  return evaluateReinvestAuditGate({
+    report,
+    since,
+    lookbackHours: options.auditLookbackHours,
+    minPositions: options.auditMinPositions
+  });
 }
 
 function tradeMayHaveMutatedState(trade: WeatherReinvestTradeResult): boolean {
@@ -757,8 +848,20 @@ export async function runWeatherReinvestment(
   const minCashToReinvestUsd = Math.max(0, options.minCashToReinvestUsd ?? 5);
   const targetCashReserveUsd = Math.max(0, options.targetCashReserveUsd ?? 0);
   const deployableCashUsd = deployableWeatherCash(afterSellState.cashUsd, targetCashReserveUsd);
+  const pauseBuys = options.pauseBuys === true;
+  const auditLookbackHours = Math.max(1, options.auditLookbackHours ?? 48);
+  const auditMinPositions = Math.max(1, Math.trunc(options.auditMinPositions ?? 5));
+  const auditGate = options.requireRecentAuditPositive === true
+    ? await assessRecentAuditGate(ledgerPath, afterSellState.positions, {
+      auditLookbackHours,
+      auditMinPositions,
+      now: options.now
+    })
+    : undefined;
   const targetDate = targetDateFromOptions(options);
-  const skippedBeforeScan = deployableCashUsd < minCashToReinvestUsd;
+  const skippedForCash = deployableCashUsd < minCashToReinvestUsd;
+  const skippedForAuditGate = auditGate !== undefined && !auditGate.passed;
+  const skippedBeforeScan = pauseBuys || skippedForCash || skippedForAuditGate;
   const edgeReport = skippedBeforeScan
     ? undefined
     : await computeWeatherEdgeReport(config, {
@@ -800,7 +903,11 @@ export async function runWeatherReinvestment(
       skipped: [{
         action: "buy_edge" as const,
         status: "skipped" as const,
-        reason: `Deployable cash ${deployableCashUsd.toFixed(2)} after target reserve ${targetCashReserveUsd.toFixed(2)} is below min cash to reinvest ${minCashToReinvestUsd.toFixed(2)}; skipped WeatherEdge scan.`
+        reason: pauseBuys
+          ? "Fresh WeatherEdge buys are paused by --pause-buys."
+          : skippedForAuditGate
+          ? `Recent audit gate blocked new WeatherEdge buys: ${auditGate?.reason}`
+          : `Deployable cash ${deployableCashUsd.toFixed(2)} after target reserve ${targetCashReserveUsd.toFixed(2)} is below min cash to reinvest ${minCashToReinvestUsd.toFixed(2)}; skipped WeatherEdge scan.`
       }],
       warnings: []
     };
@@ -827,6 +934,7 @@ export async function runWeatherReinvestment(
 
   return {
     execute,
+    pauseBuys,
     startedAt,
     finishedAt: new Date().toISOString(),
     ledgerPath,
@@ -854,12 +962,19 @@ export async function runWeatherReinvestment(
     sold: sellResult.sold,
     bought: buyResult.bought,
     skipped: [...sellResult.skipped, ...buyResult.skipped],
+    auditGate,
     warnings: [
       ...sellResult.warnings,
       ...buyResult.warnings,
       ...cashWarnings,
-      ...(skippedBeforeScan
+      ...(pauseBuys
+        ? ["Skipped WeatherEdge scan because fresh buys are paused by --pause-buys."]
+        : []),
+      ...(skippedForCash
         ? [`Skipped WeatherEdge scan because deployable cash ${deployableCashUsd.toFixed(2)} after target reserve ${targetCashReserveUsd.toFixed(2)} is below ${minCashToReinvestUsd.toFixed(2)}.`]
+        : []),
+      ...(skippedForAuditGate && auditGate
+        ? [`Skipped WeatherEdge scan because recent audited performance failed the market-informed opposite-side gate: ${auditGate.reason}`]
         : [])
     ]
   };
