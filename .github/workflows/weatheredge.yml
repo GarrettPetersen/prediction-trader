@@ -24,9 +24,11 @@ jobs:
       TZ: America/Vancouver
       WEATHEREDGE_LIVE: ${{ vars.WEATHEREDGE_LIVE || '0' }}
       WEATHEREDGE_BANKROLL: ${{ vars.WEATHEREDGE_BANKROLL }}
-      WEATHEREDGE_MAX_PER_TRADE: ${{ vars.WEATHEREDGE_MAX_PER_TRADE || '10' }}
+      WEATHEREDGE_MAX_PER_TRADE: ${{ vars.WEATHEREDGE_MAX_PER_TRADE || '1' }}
       WEATHEREDGE_MAX_BUYS: ${{ vars.WEATHEREDGE_MAX_BUYS || '8' }}
       WEATHEREDGE_MAX_GROUP_FRACTION: ${{ vars.WEATHEREDGE_MAX_GROUP_FRACTION || '0.25' }}
+      WEATHEREDGE_MAX_BUY_SPEND_FRACTION: ${{ vars.WEATHEREDGE_MAX_BUY_SPEND_FRACTION || '0.05' }}
+      WEATHEREDGE_MAX_BUY_SPEND_USD: ${{ vars.WEATHEREDGE_MAX_BUY_SPEND_USD }}
       WEATHEREDGE_KELLY_MULTIPLIER: ${{ vars.WEATHEREDGE_KELLY_MULTIPLIER || '0.25' }}
       WEATHEREDGE_MAX_KELLY_FRACTION: ${{ vars.WEATHEREDGE_MAX_KELLY_FRACTION || '0.25' }}
       WEATHEREDGE_MIN_EDGE: ${{ vars.WEATHEREDGE_MIN_EDGE }}
@@ -132,7 +134,11 @@ jobs:
             exit 1
           fi
 
-          ARGS="--days-ahead 1 --max-per-trade ${WEATHEREDGE_MAX_PER_TRADE} --max-buys ${WEATHEREDGE_MAX_BUYS} --max-group-fraction ${WEATHEREDGE_MAX_GROUP_FRACTION} --kelly-multiplier ${WEATHEREDGE_KELLY_MULTIPLIER} --max-kelly-fraction ${WEATHEREDGE_MAX_KELLY_FRACTION} --min-edge ${WEATHEREDGE_MIN_EDGE} --min-confidence ${WEATHEREDGE_MIN_CONFIDENCE} --min-cash-to-reinvest ${WEATHEREDGE_MIN_CASH_TO_REINVEST} --target-cash-reserve ${WEATHEREDGE_TARGET_CASH_RESERVE} --high-entry-start-local-time ${WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME} --high-entry-end-local-time ${WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME} --low-entry-start-local-time ${WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME} --low-entry-end-local-time ${WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME} --max-model-run-age-hours ${WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS} --report-path data/trades/weatheredge-report.json"
+          ARGS="--days-ahead 1 --max-per-trade ${WEATHEREDGE_MAX_PER_TRADE} --max-buys ${WEATHEREDGE_MAX_BUYS} --max-group-fraction ${WEATHEREDGE_MAX_GROUP_FRACTION} --max-buy-spend-fraction ${WEATHEREDGE_MAX_BUY_SPEND_FRACTION} --kelly-multiplier ${WEATHEREDGE_KELLY_MULTIPLIER} --max-kelly-fraction ${WEATHEREDGE_MAX_KELLY_FRACTION} --min-edge ${WEATHEREDGE_MIN_EDGE} --min-confidence ${WEATHEREDGE_MIN_CONFIDENCE} --min-cash-to-reinvest ${WEATHEREDGE_MIN_CASH_TO_REINVEST} --target-cash-reserve ${WEATHEREDGE_TARGET_CASH_RESERVE} --high-entry-start-local-time ${WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME} --high-entry-end-local-time ${WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME} --low-entry-start-local-time ${WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME} --low-entry-end-local-time ${WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME} --max-model-run-age-hours ${WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS} --report-path data/trades/weatheredge-report.json"
+
+          if [ -n "${WEATHEREDGE_MAX_BUY_SPEND_USD}" ]; then
+            ARGS="${ARGS} --max-buy-spend-usd ${WEATHEREDGE_MAX_BUY_SPEND_USD}"
+          fi
 
           if [ -n "${WEATHEREDGE_BANKROLL}" ]; then
             ARGS="${ARGS} --bankroll ${WEATHEREDGE_BANKROLL}"

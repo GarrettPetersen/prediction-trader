@@ -68,6 +68,8 @@ export interface WeatherReinvestOptions extends Pick<
   kellyMultiplier?: number;
   maxKellyFraction?: number;
   maxGroupFraction?: number;
+  maxBuySpendUsd?: number;
+  maxBuySpendFraction?: number;
   portfolioStepUsd?: number;
   minEdge?: number;
   skipClimatology?: boolean;
@@ -148,6 +150,7 @@ export interface WeatherReinvestReport {
   bankrollSource: "computed_vistadex_mark_to_mid" | "override";
   targetCashReserveUsd: number;
   deployableCashUsd: number;
+  buyCashBudgetUsd: number;
   targetDate: string;
   weatherEdge: Pick<
     WeatherEdgeReport,
@@ -212,6 +215,34 @@ function roundUsd(value: number): number {
 
 export function deployableWeatherCash(cashUsd: number, targetCashReserveUsd = 0): number {
   return roundUsd(Math.max(0, cashUsd - Math.max(0, targetCashReserveUsd)));
+}
+
+export function weatherBuyCashBudget(input: {
+  deployableCashUsd: number;
+  bankrollUsd: number;
+  maxBuySpendUsd?: number;
+  maxBuySpendFraction?: number;
+}): number {
+  if (!Number.isFinite(input.deployableCashUsd) || input.deployableCashUsd < 0) {
+    throw new Error("WeatherEdge deployable cash must be a non-negative number.");
+  }
+  if (!Number.isFinite(input.bankrollUsd) || input.bankrollUsd < 0) {
+    throw new Error("WeatherEdge bankroll must be a non-negative number.");
+  }
+  let budget = input.deployableCashUsd;
+  if (input.maxBuySpendUsd !== undefined) {
+    if (!Number.isFinite(input.maxBuySpendUsd) || input.maxBuySpendUsd < 0) {
+      throw new Error("WeatherEdge max buy spend USD must be a non-negative number.");
+    }
+    budget = Math.min(budget, input.maxBuySpendUsd);
+  }
+  if (input.maxBuySpendFraction !== undefined) {
+    if (!Number.isFinite(input.maxBuySpendFraction) || input.maxBuySpendFraction < 0 || input.maxBuySpendFraction > 1) {
+      throw new Error("WeatherEdge max buy spend fraction must be between 0 and 1.");
+    }
+    budget = Math.min(budget, input.bankrollUsd * input.maxBuySpendFraction);
+  }
+  return roundUsd(budget);
 }
 
 export function requireReinvestMinEdge(minEdge?: number): number {
@@ -888,6 +919,12 @@ export async function runWeatherReinvestment(
   const minCashToReinvestUsd = Math.max(0, options.minCashToReinvestUsd ?? 5);
   const targetCashReserveUsd = Math.max(0, options.targetCashReserveUsd ?? 0);
   const deployableCashUsd = deployableWeatherCash(afterSellState.cashUsd, targetCashReserveUsd);
+  const buyCashBudgetUsd = weatherBuyCashBudget({
+    deployableCashUsd,
+    bankrollUsd,
+    maxBuySpendUsd: options.maxBuySpendUsd,
+    maxBuySpendFraction: options.maxBuySpendFraction
+  });
   const pauseBuys = options.pauseBuys === true;
   const auditLookbackHours = Math.max(1, options.auditLookbackHours ?? 48);
   const auditMinPositions = Math.max(1, Math.trunc(options.auditMinPositions ?? 5));
@@ -899,7 +936,7 @@ export async function runWeatherReinvestment(
     })
     : undefined;
   const targetDate = targetDateFromOptions(options);
-  const skippedForCash = deployableCashUsd < minCashToReinvestUsd;
+  const skippedForCash = buyCashBudgetUsd < minCashToReinvestUsd;
   const skippedForAuditGate = auditGate !== undefined && !auditGate.passed;
   const maxModelRunAgeHours = requirePositiveModelRunAgeHours(options.maxModelRunAgeHours);
   const forecastFreshness = pauseBuys || skippedForCash || skippedForAuditGate
@@ -942,7 +979,7 @@ export async function runWeatherReinvestment(
       ledgerPath,
       edgeReport,
       afterSellState.positions,
-      deployableCashUsd,
+      buyCashBudgetUsd,
       bankrollUsd,
       buyOptions
     )
@@ -957,7 +994,7 @@ export async function runWeatherReinvestment(
           ? `Recent audit gate blocked new WeatherEdge buys: ${auditGate?.reason}`
           : skippedForForecastFreshness
           ? `Forecast freshness gate blocked new WeatherEdge buys: ${forecastFreshness?.reason}`
-          : `Deployable cash ${deployableCashUsd.toFixed(2)} after target reserve ${targetCashReserveUsd.toFixed(2)} is below min cash to reinvest ${minCashToReinvestUsd.toFixed(2)}; skipped WeatherEdge scan.`
+          : `Buy cash budget ${buyCashBudgetUsd.toFixed(2)} from deployable cash ${deployableCashUsd.toFixed(2)} is below min cash to reinvest ${minCashToReinvestUsd.toFixed(2)}; skipped WeatherEdge scan.`
       }],
       warnings: []
     };
@@ -995,6 +1032,7 @@ export async function runWeatherReinvestment(
     bankrollSource: options.bankrollUsd === undefined ? "computed_vistadex_mark_to_mid" : "override",
     targetCashReserveUsd: roundUsd(targetCashReserveUsd),
     deployableCashUsd: roundUsd(deployableWeatherCash(finalState.cashUsd, targetCashReserveUsd)),
+    buyCashBudgetUsd: roundUsd(buyCashBudgetUsd),
     targetDate: edgeReport?.targetDate ?? targetDate,
     weatherEdge: edgeReport
       ? {
@@ -1022,7 +1060,7 @@ export async function runWeatherReinvestment(
         ? ["Skipped WeatherEdge scan because fresh buys are paused by --pause-buys."]
         : []),
       ...(skippedForCash
-        ? [`Skipped WeatherEdge scan because deployable cash ${deployableCashUsd.toFixed(2)} after target reserve ${targetCashReserveUsd.toFixed(2)} is below ${minCashToReinvestUsd.toFixed(2)}.`]
+        ? [`Skipped WeatherEdge scan because buy cash budget ${buyCashBudgetUsd.toFixed(2)} from deployable cash ${deployableCashUsd.toFixed(2)} after target reserve ${targetCashReserveUsd.toFixed(2)} is below ${minCashToReinvestUsd.toFixed(2)}.`]
         : []),
       ...(skippedForAuditGate && auditGate
         ? [`Skipped WeatherEdge scan because recent audited performance failed the market-informed opposite-side gate: ${auditGate.reason}`]

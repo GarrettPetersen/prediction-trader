@@ -508,6 +508,7 @@ npm run weather:reinvest -- \
   --max-per-trade 10 \
   --max-buys 8 \
   --max-group-fraction 0.25 \
+  --max-buy-spend-fraction 0.05 \
   --kelly-multiplier 0.25 \
   --max-kelly-fraction 0.25 \
   --min-edge 0.20 \
@@ -556,17 +557,22 @@ to an uncalibrated climatology blend. Use `--no-calibration` only when you are
 intentionally inspecting the old heuristic model.
 
 After selling locked weather positions, the loop skips the WeatherEdge
-market/forecast scan when deployable cash is below `--min-cash-to-reinvest`
-defaulting to `$5`. Deployable cash is current Vistadex USDC cash after
-subtracting `--target-cash-reserve`, which lets the bot intentionally hold a
-cash buffer instead of spending the whole float. The scheduled GitHub Actions
-loop defaults that reserve to `$20`. This keeps scheduled runs cheap when
-there is nothing meaningful to deploy.
+market/forecast scan when the buy cash budget is below
+`--min-cash-to-reinvest` defaulting to `$5`. Deployable cash is current Vistadex
+USDC cash after subtracting `--target-cash-reserve`, which lets the bot
+intentionally hold a cash buffer instead of spending the whole float. The buy
+cash budget is then capped by `--max-buy-spend-usd` and
+`--max-buy-spend-fraction`; the scheduled GitHub Actions loop defaults to
+`--max-per-trade 1` and `--max-buy-spend-fraction 0.05`, so no single fresh buy
+should exceed `$1` and a run cannot deploy more than 5% of bankroll into new
+positions. This keeps scheduled runs cheap when there is nothing meaningful to
+deploy.
 
 The `--bankroll` override is optional. If omitted, the command uses current
 Vistadex cash plus marked position value. For example, a `$133` bankroll with
 `--max-group-fraction 0.25` permits up to `$33.25` of exposure in one
-city/station/day group, while `--max-per-trade` still caps each individual RFQ.
+city/station/day group, while `--max-per-trade` still caps each individual RFQ
+and `--max-buy-spend-fraction 0.05` caps new deployment for that run at `$6.65`.
 
 ### GitHub Actions Weather Loop
 
@@ -590,9 +596,11 @@ Configure repository variables:
 ```text
 WEATHEREDGE_LIVE=0
 WEATHEREDGE_BANKROLL=
-WEATHEREDGE_MAX_PER_TRADE=10
+WEATHEREDGE_MAX_PER_TRADE=1
 WEATHEREDGE_MAX_BUYS=8
 WEATHEREDGE_MAX_GROUP_FRACTION=0.25
+WEATHEREDGE_MAX_BUY_SPEND_FRACTION=0.05
+WEATHEREDGE_MAX_BUY_SPEND_USD=
 WEATHEREDGE_KELLY_MULTIPLIER=0.25
 WEATHEREDGE_MAX_KELLY_FRACTION=0.25
 WEATHEREDGE_MIN_EDGE=0.20

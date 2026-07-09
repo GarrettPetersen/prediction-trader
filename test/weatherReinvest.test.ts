@@ -5,7 +5,8 @@ import {
   deployableWeatherCash,
   evaluateReinvestAuditGate,
   requirePositiveModelRunAgeHours,
-  requireReinvestMinEdge
+  requireReinvestMinEdge,
+  weatherBuyCashBudget
 } from "../src/weatherReinvest.js";
 
 describe("weather reinvestment cash reserve", () => {
@@ -17,6 +18,37 @@ describe("weather reinvestment cash reserve", () => {
 
   it("treats negative reserve inputs as zero", () => {
     assert.equal(deployableWeatherCash(12.34, -5), 12.34);
+  });
+});
+
+describe("weather reinvestment buy budget", () => {
+  it("caps deployable cash by absolute and fractional buy limits", () => {
+    assert.equal(weatherBuyCashBudget({
+      deployableCashUsd: 50,
+      bankrollUsd: 100,
+      maxBuySpendUsd: 8,
+      maxBuySpendFraction: 0.05
+    }), 5);
+  });
+
+  it("uses deployable cash when buy limits are higher than cash", () => {
+    assert.equal(weatherBuyCashBudget({
+      deployableCashUsd: 3,
+      bankrollUsd: 100,
+      maxBuySpendUsd: 8,
+      maxBuySpendFraction: 0.05
+    }), 3);
+  });
+
+  it("rejects invalid buy spend fractions", () => {
+    assert.throws(
+      () => weatherBuyCashBudget({
+        deployableCashUsd: 50,
+        bankrollUsd: 100,
+        maxBuySpendFraction: 1.1
+      }),
+      /between 0 and 1/
+    );
   });
 });
 
