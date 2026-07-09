@@ -507,8 +507,10 @@ npm run weather:reinvest -- \
   --require-recent-audit-positive \
   --audit-lookback-hours 72 \
   --audit-min-positions 5 \
-  --entry-start-local-time 20:00 \
-  --entry-end-local-time 23:30 \
+  --high-entry-start-local-time 20:00 \
+  --high-entry-end-local-time 23:30 \
+  --low-entry-start-local-time 11:00 \
+  --low-entry-end-local-time 14:30 \
   --report-path data/trades/weatheredge-report.json
 ```
 
@@ -516,11 +518,12 @@ That command checks current Vistadex cash and positions, quotes weather
 positions that are effectively locked at `0.99+`, sells only if the live RFQ is
 still favorable, refreshes tomorrow's station-aligned weather edges, and buys
 positive-edge Vistadex weather positions with city/date portfolio sizing only
-inside each market's station-local day-ahead entry window. By default that
-window is `20:00-23:30` on the local calendar day before the target date. Cash
-freed outside that window is held until a later scheduled run. The loop does
-not touch Polymarket. Add `--execute` only after `PREDICTION_TRADER_LIVE=1` is
-set and the dry-run report looks sane.
+inside each market's station-local day-ahead entry window. By default high
+temperature markets enter `20:00-23:30` on the local calendar day before the
+target date, while low temperature markets enter `11:00-14:30` on the previous
+day. Cash freed outside the matching window is held until a later scheduled
+run. The loop does not touch Polymarket. Add `--execute` only after
+`PREDICTION_TRADER_LIVE=1` is set and the dry-run report looks sane.
 
 `--pause-buys` leaves the sell side active, so locked weather positions can
 still be liquidated, but it skips the fresh market/forecast scan and opens no
@@ -585,8 +588,10 @@ WEATHEREDGE_PAUSE_BUYS=true
 WEATHEREDGE_REQUIRE_RECENT_AUDIT_POSITIVE=true
 WEATHEREDGE_AUDIT_LOOKBACK_HOURS=72
 WEATHEREDGE_AUDIT_MIN_POSITIONS=5
-WEATHEREDGE_ENTRY_START_LOCAL_TIME=20:00
-WEATHEREDGE_ENTRY_END_LOCAL_TIME=23:30
+WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME=20:00
+WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME=23:30
+WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME=11:00
+WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME=14:30
 WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS=
 WEATHEREDGE_CITY_BIAS_PRIOR_WEIGHT=
 PREDICTION_TRADER_MAX_USD=10
@@ -611,9 +616,11 @@ strategy back on.
 The workflow sets `TZ=America/Vancouver`, so `--days-ahead 1` means tomorrow
 from British Columbia rather than UTC. Candidate buys are still gated by the
 resolution station's own timezone: every three-hour run may sell locked
-positions, but it opens fresh day-ahead positions only when the station-local
-clock is inside `WEATHEREDGE_ENTRY_START_LOCAL_TIME` through
-`WEATHEREDGE_ENTRY_END_LOCAL_TIME` on the day before the target date. It
+positions, but it opens fresh high-temperature positions only inside
+`WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME` through
+`WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME`, and fresh low-temperature positions
+only inside `WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME` through
+`WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME`, on the day before the target date. It
 restores and saves `.cache/weatheredge` and `data/weather` with `actions/cache`
 so calibration datasets and implementation caches survive between runs once
 seeded. It also uploads `data/trades/ledger.jsonl` and
@@ -806,8 +813,10 @@ npm run weather:backtest:markets -- \
   --sizing city-portfolio \
   --max-group-fraction 0.25 \
   --entry-mode cron-entry-window \
-  --entry-start-local-time 20:00 \
-  --entry-end-local-time 23:30 \
+  --high-entry-start-local-time 20:00 \
+  --high-entry-end-local-time 23:30 \
+  --low-entry-start-local-time 11:00 \
+  --low-entry-end-local-time 14:30 \
   --cron-interval-hours 3 \
   --cron-minute 17 \
   --fill-slippage 0.02 \

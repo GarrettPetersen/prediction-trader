@@ -206,6 +206,13 @@ function localTimeMinutesArg(args: Args, key: string): number | undefined {
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
+function rejectArgs(args: Args, keys: string[], message: string): void {
+  const present = keys.filter((key) => args[key] !== undefined);
+  if (present.length > 0) {
+    throw new Error(`${present.map((key) => `--${key}`).join(", ")} ${message}`);
+  }
+}
+
 function numberListArg(args: Args, key: string): number[] | undefined {
   const values = listArg(args, key, false);
   if (values.length === 0) return undefined;
@@ -1334,9 +1341,9 @@ Commands:
   weather:tomorrow [--top N | --all] [--signals-only] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--sizing independent-kelly|city-portfolio] [--max-group-fraction N] [--portfolio-step-usd N] [--no-calibration] [--no-climatology] [--concurrency N] [--allow-started-day]
   weather:midday (--held-vistadex | --slug SLUG | --slugs SLUG[,SLUG...]) [--date YYYY-MM-DD] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko] [--metar-hours N] [--top N | --all] [--signals-only] [--reports] [--resolution-actuals] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N]
   weather:backtest --city CITY [--country CODE] --date YYYY-MM-DD [--measure temperature_high|temperature_low] [--years N] [--threshold N]
-  weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--sizing independent-kelly|city-portfolio] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--max-group-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--entry-mode event-end-minus-lead|cron-entry-window] [--entry-start-local-time HH:MM] [--entry-end-local-time HH:MM] [--cron-interval-hours N] [--cron-minute N] [--fill-slippage N] [--min-executable-edge N]
+  weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--sizing independent-kelly|city-portfolio] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--max-group-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--entry-mode event-end-minus-lead|cron-entry-window] [--high-entry-start-local-time HH:MM] [--high-entry-end-local-time HH:MM] [--low-entry-start-local-time HH:MM] [--low-entry-end-local-time HH:MM] [--cron-interval-hours N] [--cron-minute N] [--fill-slippage N] [--min-executable-edge N]
   weather:resolution-audit [--date YYYY-MM-DD | --days-ahead N] [--status active|closed] [--distance-ok-km N] [--distance-warn-km N] [--top N]
-  weather:reinvest [--execute] [--pause-buys] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--min-edge N] [--min-cash-to-reinvest N] [--target-cash-reserve N] [--min-confidence low|medium|high] [--require-recent-audit-positive] [--audit-lookback-hours N] [--audit-min-positions N] [--no-calibration] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--entry-start-local-time HH:MM] [--entry-end-local-time HH:MM] [--report-path PATH]
+  weather:reinvest [--execute] [--pause-buys] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--min-edge N] [--min-cash-to-reinvest N] [--target-cash-reserve N] [--min-confidence low|medium|high] [--require-recent-audit-positive] [--audit-lookback-hours N] [--audit-min-positions N] [--no-calibration] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--high-entry-start-local-time HH:MM] [--high-entry-end-local-time HH:MM] [--low-entry-start-local-time HH:MM] [--low-entry-end-local-time HH:MM] [--report-path PATH]
   weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N]
   weather:dataset:observations (--city CITY [--country CODE] | --latitude N --longitude N) --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--ncei-station ID | --ncei-location ID] [--path PATH]
   weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--closed] [--descending] [--path PATH]
@@ -1629,6 +1636,11 @@ async function run(): Promise<void> {
   }
 
   if (command === "weather:backtest:markets") {
+    rejectArgs(
+      args,
+      ["entry-start-local-time", "entry-end-local-time"],
+      "were replaced by explicit high/low entry-window flags."
+    );
     const report = await runWeatherMarketBacktest(config, {
       date: requiredStringArg(args, "date"),
       leadDays: numberArg(args, "lead-days", false),
@@ -1649,8 +1661,10 @@ async function run(): Promise<void> {
       portfolioStepUsd: numberArg(args, "portfolio-step-usd", false),
       sizingStrategy: weatherSizingStrategyArg(args),
       entryMode: weatherBacktestEntryModeArg(args),
-      entryStartLocalMinutes: localTimeMinutesArg(args, "entry-start-local-time"),
-      entryEndLocalMinutes: localTimeMinutesArg(args, "entry-end-local-time"),
+      highEntryStartLocalMinutes: localTimeMinutesArg(args, "high-entry-start-local-time"),
+      highEntryEndLocalMinutes: localTimeMinutesArg(args, "high-entry-end-local-time"),
+      lowEntryStartLocalMinutes: localTimeMinutesArg(args, "low-entry-start-local-time"),
+      lowEntryEndLocalMinutes: localTimeMinutesArg(args, "low-entry-end-local-time"),
       cronIntervalHours: numberArg(args, "cron-interval-hours", false),
       cronMinute: numberArg(args, "cron-minute", false),
       fillSlippage: numberArg(args, "fill-slippage", false),
@@ -1757,6 +1771,11 @@ async function run(): Promise<void> {
   }
 
   if (command === "weather:reinvest") {
+    rejectArgs(
+      args,
+      ["entry-start-local-time", "entry-end-local-time"],
+      "were replaced by explicit high/low entry-window flags."
+    );
     const report = await runWeatherReinvestment(config, {
       execute,
       ledgerPath,
@@ -1791,8 +1810,10 @@ async function run(): Promise<void> {
       buyMinExecutableEdge: numberArg(args, "buy-min-executable-edge", false),
       buyQuoteDriftUsd: numberArg(args, "buy-quote-drift", false),
       pauseBuys: args["pause-buys"] === true,
-      entryStartLocalMinutes: localTimeMinutesArg(args, "entry-start-local-time"),
-      entryEndLocalMinutes: localTimeMinutesArg(args, "entry-end-local-time"),
+      highEntryStartLocalMinutes: localTimeMinutesArg(args, "high-entry-start-local-time"),
+      highEntryEndLocalMinutes: localTimeMinutesArg(args, "high-entry-end-local-time"),
+      lowEntryStartLocalMinutes: localTimeMinutesArg(args, "low-entry-start-local-time"),
+      lowEntryEndLocalMinutes: localTimeMinutesArg(args, "low-entry-end-local-time"),
       requireRecentAuditPositive: args["require-recent-audit-positive"] === true,
       auditLookbackHours: numberArg(args, "audit-lookback-hours", false),
       auditMinPositions: numberArg(args, "audit-min-positions", false)

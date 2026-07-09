@@ -82,6 +82,7 @@ describe("weather trading window", () => {
   it("allows day-ahead entries in the station-local evening window", () => {
     const assessment = assessWeatherEntryWindow({
       targetDate: "2026-07-08",
+      measure: "temperature_high",
       countryCode: "JP",
       now: new Date("2026-07-07T11:17:00Z")
     });
@@ -96,6 +97,7 @@ describe("weather trading window", () => {
   it("holds cash before the station-local evening entry window", () => {
     const assessment = assessWeatherEntryWindow({
       targetDate: "2026-07-08",
+      measure: "temperature_high",
       countryCode: "GB",
       now: new Date("2026-07-07T12:17:00Z")
     });
@@ -106,9 +108,51 @@ describe("weather trading window", () => {
     assert.equal(assessment.localTime, "13:17");
   });
 
+  it("enters low-temperature markets around station-local midday", () => {
+    const assessment = assessWeatherEntryWindow({
+      targetDate: "2026-07-08",
+      measure: "temperature_low",
+      countryCode: "GB",
+      now: new Date("2026-07-07T12:17:00Z")
+    });
+
+    assert.equal(assessment.shouldEnter, true);
+    assert.equal(assessment.status, "inside_entry_window");
+    assert.equal(assessment.localDate, "2026-07-07");
+    assert.equal(assessment.localTime, "13:17");
+    assert.equal(assessment.entryStartMinutes, 11 * 60);
+    assert.equal(assessment.entryEndMinutes, 14 * 60 + 30);
+  });
+
+  it("skips low-temperature markets near midnight even when high-temperature markets can enter", () => {
+    const now = new Date("2026-07-07T22:18:00Z");
+    const base = {
+      targetDate: "2026-07-08",
+      countryCode: "GB",
+      now
+    };
+
+    const high = assessWeatherEntryWindow({
+      ...base,
+      measure: "temperature_high"
+    });
+    assert.equal(high.shouldEnter, true);
+    assert.equal(high.status, "inside_entry_window");
+    assert.equal(high.localTime, "23:18");
+
+    const low = assessWeatherEntryWindow({
+      ...base,
+      measure: "temperature_low"
+    });
+    assert.equal(low.shouldEnter, false);
+    assert.equal(low.status, "after_entry_window");
+    assert.equal(low.localTime, "23:18");
+  });
+
   it("rejects entries once the station-local target day has started", () => {
     const assessment = assessWeatherEntryWindow({
       targetDate: "2026-07-08",
+      measure: "temperature_high",
       countryCode: "HK",
       now: new Date("2026-07-07T17:30:00Z")
     });

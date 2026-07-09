@@ -20,8 +20,11 @@ import {
   weatherStationTargetKey
 } from "./weatherStations.js";
 import {
-  DEFAULT_ENTRY_END_MINUTES,
-  DEFAULT_ENTRY_START_MINUTES,
+  assertWeatherEntryWindowMinutes,
+  DEFAULT_HIGH_ENTRY_END_MINUTES,
+  DEFAULT_HIGH_ENTRY_START_MINUTES,
+  DEFAULT_LOW_ENTRY_END_MINUTES,
+  DEFAULT_LOW_ENTRY_START_MINUTES,
   inferWeatherTimeZone
 } from "./weatherTradingWindow.js";
 import {
@@ -70,8 +73,10 @@ export interface WeatherMarketBacktestOptions {
   portfolioStepUsd?: number;
   sizingStrategy?: WeatherBacktestSizingStrategy;
   entryMode?: WeatherBacktestEntryMode;
-  entryStartLocalMinutes?: number;
-  entryEndLocalMinutes?: number;
+  highEntryStartLocalMinutes?: number;
+  highEntryEndLocalMinutes?: number;
+  lowEntryStartLocalMinutes?: number;
+  lowEntryEndLocalMinutes?: number;
   cronIntervalHours?: number;
   cronMinute?: number;
   fillSlippage?: number;
@@ -193,8 +198,10 @@ export interface WeatherMarketBacktestReport {
     minExecutableEdge: number;
     cronIntervalHours?: number;
     cronMinute?: number;
-    entryStartLocalMinutes?: number;
-    entryEndLocalMinutes?: number;
+    highEntryStartLocalMinutes?: number;
+    highEntryEndLocalMinutes?: number;
+    lowEntryStartLocalMinutes?: number;
+    lowEntryEndLocalMinutes?: number;
   };
   trades: WeatherBacktestTrade[];
 }
@@ -424,8 +431,10 @@ function backtestDecisionTime(input: {
   leadDays: number;
   entryMode: WeatherBacktestEntryMode;
   targetMetadata: Map<string, ForecastTargetMetadata>;
-  entryStartLocalMinutes: number;
-  entryEndLocalMinutes: number;
+  highEntryStartLocalMinutes: number;
+  highEntryEndLocalMinutes: number;
+  lowEntryStartLocalMinutes: number;
+  lowEntryEndLocalMinutes: number;
   cronIntervalHours: number;
   cronMinute: number;
 }): BacktestDecisionTime | undefined {
@@ -440,11 +449,12 @@ function backtestDecisionTime(input: {
   const metadata = input.targetMetadata.get(input.target.targetKey);
   const timezone = inferWeatherTimeZone(metadata ?? {});
   if (!timezone) return undefined;
+  const isLowMarket = input.market.parsed.measure === "temperature_low";
   const decisionTimeMs = cronEntryDecisionTimeMs({
     targetDate: input.market.parsed.date,
     timezone,
-    entryStartLocalMinutes: input.entryStartLocalMinutes,
-    entryEndLocalMinutes: input.entryEndLocalMinutes,
+    entryStartLocalMinutes: isLowMarket ? input.lowEntryStartLocalMinutes : input.highEntryStartLocalMinutes,
+    entryEndLocalMinutes: isLowMarket ? input.lowEntryEndLocalMinutes : input.highEntryEndLocalMinutes,
     cronIntervalHours: input.cronIntervalHours,
     cronMinute: input.cronMinute
   });
@@ -653,8 +663,12 @@ export async function runWeatherMarketBacktest(
     : Math.max(0.01, options.portfolioStepUsd);
   const sizingStrategy = options.sizingStrategy ?? "independent_kelly";
   const entryMode = options.entryMode ?? "event_end_minus_lead";
-  const entryStartLocalMinutes = options.entryStartLocalMinutes ?? DEFAULT_ENTRY_START_MINUTES;
-  const entryEndLocalMinutes = options.entryEndLocalMinutes ?? DEFAULT_ENTRY_END_MINUTES;
+  const highEntryStartLocalMinutes = options.highEntryStartLocalMinutes ?? DEFAULT_HIGH_ENTRY_START_MINUTES;
+  const highEntryEndLocalMinutes = options.highEntryEndLocalMinutes ?? DEFAULT_HIGH_ENTRY_END_MINUTES;
+  const lowEntryStartLocalMinutes = options.lowEntryStartLocalMinutes ?? DEFAULT_LOW_ENTRY_START_MINUTES;
+  const lowEntryEndLocalMinutes = options.lowEntryEndLocalMinutes ?? DEFAULT_LOW_ENTRY_END_MINUTES;
+  assertWeatherEntryWindowMinutes("temperature_high", highEntryStartLocalMinutes, highEntryEndLocalMinutes);
+  assertWeatherEntryWindowMinutes("temperature_low", lowEntryStartLocalMinutes, lowEntryEndLocalMinutes);
   const cronIntervalHours = Math.max(1, Math.trunc(options.cronIntervalHours ?? 3));
   const cronMinute = Math.max(0, Math.min(59, Math.trunc(options.cronMinute ?? 17)));
   const fillSlippage = Math.max(0, options.fillSlippage ?? 0);
@@ -704,8 +718,10 @@ export async function runWeatherMarketBacktest(
       leadDays,
       entryMode,
       targetMetadata,
-      entryStartLocalMinutes,
-      entryEndLocalMinutes,
+      highEntryStartLocalMinutes,
+      highEntryEndLocalMinutes,
+      lowEntryStartLocalMinutes,
+      lowEntryEndLocalMinutes,
       cronIntervalHours,
       cronMinute
     });
@@ -983,8 +999,10 @@ export async function runWeatherMarketBacktest(
       minExecutableEdge,
       cronIntervalHours: entryMode === "cron_entry_window" ? cronIntervalHours : undefined,
       cronMinute: entryMode === "cron_entry_window" ? cronMinute : undefined,
-      entryStartLocalMinutes: entryMode === "cron_entry_window" ? entryStartLocalMinutes : undefined,
-      entryEndLocalMinutes: entryMode === "cron_entry_window" ? entryEndLocalMinutes : undefined
+      highEntryStartLocalMinutes: entryMode === "cron_entry_window" ? highEntryStartLocalMinutes : undefined,
+      highEntryEndLocalMinutes: entryMode === "cron_entry_window" ? highEntryEndLocalMinutes : undefined,
+      lowEntryStartLocalMinutes: entryMode === "cron_entry_window" ? lowEntryStartLocalMinutes : undefined,
+      lowEntryEndLocalMinutes: entryMode === "cron_entry_window" ? lowEntryEndLocalMinutes : undefined
     },
     trades
   };

@@ -35,8 +35,11 @@ import { parseWeatherMarketQuestion } from "./weatherMarkets.js";
 import { resolutionSourceFromText } from "./weatherStations.js";
 import {
   assessWeatherEntryWindow,
-  DEFAULT_ENTRY_END_MINUTES,
-  DEFAULT_ENTRY_START_MINUTES,
+  assertWeatherEntryWindowMinutes,
+  DEFAULT_HIGH_ENTRY_END_MINUTES,
+  DEFAULT_HIGH_ENTRY_START_MINUTES,
+  DEFAULT_LOW_ENTRY_END_MINUTES,
+  DEFAULT_LOW_ENTRY_START_MINUTES,
   type WeatherEntryWindowAssessment
 } from "./weatherTradingWindow.js";
 
@@ -78,8 +81,10 @@ export interface WeatherReinvestOptions extends Pick<
   buyMinExecutableEdge?: number;
   buyQuoteDriftUsd?: number;
   pauseBuys?: boolean;
-  entryStartLocalMinutes?: number;
-  entryEndLocalMinutes?: number;
+  highEntryStartLocalMinutes?: number;
+  highEntryEndLocalMinutes?: number;
+  lowEntryStartLocalMinutes?: number;
+  lowEntryEndLocalMinutes?: number;
   requireRecentAuditPositive?: boolean;
   auditLookbackHours?: number;
   auditMinPositions?: number;
@@ -286,14 +291,24 @@ function groupKeyFromRow(row: WeatherEdgeRow): string {
 
 function entryWindowFromRow(
   row: WeatherEdgeRow,
-  options: Pick<WeatherReinvestOptions, "entryStartLocalMinutes" | "entryEndLocalMinutes" | "now">
+  options: Pick<
+    WeatherReinvestOptions,
+    | "highEntryStartLocalMinutes"
+    | "highEntryEndLocalMinutes"
+    | "lowEntryStartLocalMinutes"
+    | "lowEntryEndLocalMinutes"
+    | "now"
+  >
 ): WeatherEntryWindowAssessment {
   return assessWeatherEntryWindow({
     targetDate: row.date,
+    measure: row.measure,
     timezone: row.tradingWindow?.timezone,
     now: options.now,
-    entryStartMinutes: options.entryStartLocalMinutes,
-    entryEndMinutes: options.entryEndLocalMinutes
+    highEntryStartMinutes: options.highEntryStartLocalMinutes,
+    highEntryEndMinutes: options.highEntryEndLocalMinutes,
+    lowEntryStartMinutes: options.lowEntryStartLocalMinutes,
+    lowEntryEndMinutes: options.lowEntryEndLocalMinutes
   });
 }
 
@@ -604,7 +619,18 @@ async function buyPositiveWeatherEdges(
   bankrollUsd: number,
   options: Required<Pick<
     WeatherReinvestOptions,
-    "execute" | "maxPerTradeUsd" | "maxGroupFraction" | "minTradeUsd" | "maxBuys" | "minConfidence" | "buyMinExecutableEdge" | "buyQuoteDriftUsd" | "entryStartLocalMinutes" | "entryEndLocalMinutes"
+    | "execute"
+    | "maxPerTradeUsd"
+    | "maxGroupFraction"
+    | "minTradeUsd"
+    | "maxBuys"
+    | "minConfidence"
+    | "buyMinExecutableEdge"
+    | "buyQuoteDriftUsd"
+    | "highEntryStartLocalMinutes"
+    | "highEntryEndLocalMinutes"
+    | "lowEntryStartLocalMinutes"
+    | "lowEntryEndLocalMinutes"
   >> & Pick<WeatherReinvestOptions, "now">
 ): Promise<{
   bought: WeatherReinvestTradeResult[];
@@ -804,14 +830,12 @@ export async function runWeatherReinvestment(
     sellMinPrice: options.sellMinPrice ?? 0.98,
     minSellShares: options.minSellShares ?? 0.5
   };
-  const entryStartLocalMinutes = options.entryStartLocalMinutes ?? DEFAULT_ENTRY_START_MINUTES;
-  const entryEndLocalMinutes = options.entryEndLocalMinutes ?? DEFAULT_ENTRY_END_MINUTES;
-  if (entryStartLocalMinutes < 0 || entryStartLocalMinutes > 1439 || entryEndLocalMinutes < 0 || entryEndLocalMinutes > 1439) {
-    throw new Error("WeatherEdge entry window minutes must be between 00:00 and 23:59 local time.");
-  }
-  if (entryStartLocalMinutes > entryEndLocalMinutes) {
-    throw new Error("WeatherEdge entry window cannot cross midnight; use a same-day evening window before the target date.");
-  }
+  const highEntryStartLocalMinutes = options.highEntryStartLocalMinutes ?? DEFAULT_HIGH_ENTRY_START_MINUTES;
+  const highEntryEndLocalMinutes = options.highEntryEndLocalMinutes ?? DEFAULT_HIGH_ENTRY_END_MINUTES;
+  const lowEntryStartLocalMinutes = options.lowEntryStartLocalMinutes ?? DEFAULT_LOW_ENTRY_START_MINUTES;
+  const lowEntryEndLocalMinutes = options.lowEntryEndLocalMinutes ?? DEFAULT_LOW_ENTRY_END_MINUTES;
+  assertWeatherEntryWindowMinutes("temperature_high", highEntryStartLocalMinutes, highEntryEndLocalMinutes);
+  assertWeatherEntryWindowMinutes("temperature_low", lowEntryStartLocalMinutes, lowEntryEndLocalMinutes);
   const buyOptions = {
     execute,
     maxPerTradeUsd: options.maxPerTradeUsd ?? 10,
@@ -821,8 +845,10 @@ export async function runWeatherReinvestment(
     minConfidence: (options.minConfidence ?? "MEDIUM") as WeatherReinvestConfidence,
     buyMinExecutableEdge: options.buyMinExecutableEdge ?? 0.03,
     buyQuoteDriftUsd: options.buyQuoteDriftUsd ?? 0.02,
-    entryStartLocalMinutes,
-    entryEndLocalMinutes,
+    highEntryStartLocalMinutes,
+    highEntryEndLocalMinutes,
+    lowEntryStartLocalMinutes,
+    lowEntryEndLocalMinutes,
     now: options.now
   };
 

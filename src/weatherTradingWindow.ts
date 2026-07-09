@@ -31,6 +31,7 @@ export interface WeatherTradingWindowInput {
 
 export interface WeatherEntryWindowInput {
   targetDate: string;
+  measure: WeatherMeasure;
   timezone?: string;
   countryCode?: string;
   country?: string;
@@ -38,8 +39,10 @@ export interface WeatherEntryWindowInput {
   state?: string;
   longitude?: number;
   now?: Date;
-  entryStartMinutes?: number;
-  entryEndMinutes?: number;
+  highEntryStartMinutes?: number;
+  highEntryEndMinutes?: number;
+  lowEntryStartMinutes?: number;
+  lowEntryEndMinutes?: number;
 }
 
 export interface WeatherTradingWindowAssessment {
@@ -56,6 +59,7 @@ export interface WeatherTradingWindowAssessment {
 export interface WeatherEntryWindowAssessment {
   shouldEnter: boolean;
   status: WeatherEntryWindowStatus;
+  measure: WeatherMeasure;
   timezone?: string;
   entryLocalDate?: string;
   localDate?: string;
@@ -68,8 +72,10 @@ export interface WeatherEntryWindowAssessment {
 
 const DEFAULT_HIGH_GRACE_MINUTES = 120;
 const DEFAULT_LOW_GRACE_MINUTES = 15;
-export const DEFAULT_ENTRY_START_MINUTES = 20 * 60;
-export const DEFAULT_ENTRY_END_MINUTES = 23 * 60 + 30;
+export const DEFAULT_HIGH_ENTRY_START_MINUTES = 20 * 60;
+export const DEFAULT_HIGH_ENTRY_END_MINUTES = 23 * 60 + 30;
+export const DEFAULT_LOW_ENTRY_START_MINUTES = 11 * 60;
+export const DEFAULT_LOW_ENTRY_END_MINUTES = 14 * 60 + 30;
 
 const COUNTRY_TIMEZONE: Record<string, string> = {
   AT: "Europe/Vienna",
@@ -231,6 +237,29 @@ function isoDateDaysFrom(date: string, days: number): string {
   return value.toISOString().slice(0, 10);
 }
 
+export function assertWeatherEntryWindowMinutes(label: string, startMinutes: number, endMinutes: number): void {
+  if (startMinutes < 0 || startMinutes > 1439 || endMinutes < 0 || endMinutes > 1439) {
+    throw new Error(`${label} WeatherEdge entry window minutes must be between 00:00 and 23:59 local time.`);
+  }
+  if (startMinutes > endMinutes) {
+    throw new Error(`${label} WeatherEdge entry window cannot cross midnight; use a same-day window before the target date.`);
+  }
+}
+
+export function weatherEntryWindowMinutes(input: WeatherEntryWindowInput): {
+  entryStartMinutes: number;
+  entryEndMinutes: number;
+} {
+  const entryStartMinutes = input.measure === "temperature_low"
+    ? input.lowEntryStartMinutes ?? DEFAULT_LOW_ENTRY_START_MINUTES
+    : input.highEntryStartMinutes ?? DEFAULT_HIGH_ENTRY_START_MINUTES;
+  const entryEndMinutes = input.measure === "temperature_low"
+    ? input.lowEntryEndMinutes ?? DEFAULT_LOW_ENTRY_END_MINUTES
+    : input.highEntryEndMinutes ?? DEFAULT_HIGH_ENTRY_END_MINUTES;
+  assertWeatherEntryWindowMinutes(input.measure, entryStartMinutes, entryEndMinutes);
+  return { entryStartMinutes, entryEndMinutes };
+}
+
 export function assessWeatherTradingWindow(
   input: WeatherTradingWindowInput
 ): WeatherTradingWindowAssessment {
@@ -292,13 +321,13 @@ export function assessWeatherTradingWindow(
 export function assessWeatherEntryWindow(
   input: WeatherEntryWindowInput
 ): WeatherEntryWindowAssessment {
-  const entryStartMinutes = input.entryStartMinutes ?? DEFAULT_ENTRY_START_MINUTES;
-  const entryEndMinutes = input.entryEndMinutes ?? DEFAULT_ENTRY_END_MINUTES;
+  const { entryStartMinutes, entryEndMinutes } = weatherEntryWindowMinutes(input);
   const timezone = inferWeatherTimeZone(input);
   if (!timezone) {
     return {
       shouldEnter: false,
       status: "timezone_unknown",
+      measure: input.measure,
       entryStartMinutes,
       entryEndMinutes,
       reason: "Could not infer a market-local timezone; skip rather than enter outside the intended day-ahead window."
@@ -312,6 +341,7 @@ export function assessWeatherEntryWindow(
     return {
       shouldEnter: false,
       status: "before_entry_window",
+      measure: input.measure,
       timezone,
       entryLocalDate,
       localDate: local.date,
@@ -327,6 +357,7 @@ export function assessWeatherEntryWindow(
     return {
       shouldEnter: false,
       status: "after_market_day",
+      measure: input.measure,
       timezone,
       entryLocalDate,
       localDate: local.date,
@@ -342,6 +373,7 @@ export function assessWeatherEntryWindow(
     return {
       shouldEnter: false,
       status: "market_day_started",
+      measure: input.measure,
       timezone,
       entryLocalDate,
       localDate: local.date,
@@ -357,6 +389,7 @@ export function assessWeatherEntryWindow(
     return {
       shouldEnter: false,
       status: "before_entry_window",
+      measure: input.measure,
       timezone,
       entryLocalDate,
       localDate: local.date,
@@ -372,6 +405,7 @@ export function assessWeatherEntryWindow(
     return {
       shouldEnter: false,
       status: "after_entry_window",
+      measure: input.measure,
       timezone,
       entryLocalDate,
       localDate: local.date,
@@ -386,6 +420,7 @@ export function assessWeatherEntryWindow(
   return {
     shouldEnter: true,
     status: "inside_entry_window",
+    measure: input.measure,
     timezone,
     entryLocalDate,
     localDate: local.date,
