@@ -111,6 +111,10 @@ import {
   type WeatherBacktestTrade
 } from "./weatherBacktest.js";
 import {
+  runWeatherReplayBacktest,
+  type WeatherReplayEvent
+} from "./weatherReplayBacktest.js";
+import {
   auditWeatherResolutionSources,
   type WeatherResolutionAuditRow
 } from "./weatherResolutionAudit.js";
@@ -938,6 +942,35 @@ function compactWeatherBacktestTrade(trade: WeatherBacktestTrade) {
   };
 }
 
+function compactWeatherReplayEvent(event: WeatherReplayEvent) {
+  return {
+    type: event.type,
+    time: event.time,
+    side: event.side,
+    price: round(event.price),
+    fair: round(event.fair),
+    edge: round(event.edge),
+    stakeUsd: round(event.stakeUsd, 2),
+    shares: round(event.shares, 4),
+    proceedsUsd: round(event.proceedsUsd, 2),
+    payoutUsd: round(event.payoutUsd, 2),
+    pnlUsd: round(event.pnlUsd, 2),
+    resolvedYes: event.resolvedYes,
+    won: event.won,
+    city: event.city,
+    date: event.date,
+    measure: event.measure,
+    outcomeLabel: event.outcomeLabel,
+    marketSlug: event.marketSlug,
+    question: event.question,
+    forecastTargetKey: event.forecastTargetKey,
+    resolutionStationId: event.resolutionStationId,
+    entryTimezone: event.entryTimezone,
+    priceTime: event.priceTime,
+    priceAgeHours: round(event.priceAgeHours, 2)
+  };
+}
+
 function compactWeatherResolutionAuditRow(row: WeatherResolutionAuditRow) {
   return {
     status: row.status,
@@ -1342,6 +1375,7 @@ Commands:
   weather:midday (--held-vistadex | --slug SLUG | --slugs SLUG[,SLUG...]) [--date YYYY-MM-DD] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko] [--metar-hours N] [--top N | --all] [--signals-only] [--reports] [--resolution-actuals] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N]
   weather:backtest --city CITY [--country CODE] --date YYYY-MM-DD [--measure temperature_high|temperature_low] [--years N] [--threshold N]
   weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--sizing independent-kelly|city-portfolio] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--max-group-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--entry-mode event-end-minus-lead|cron-entry-window] [--high-entry-start-local-time HH:MM] [--high-entry-end-local-time HH:MM] [--low-entry-start-local-time HH:MM] [--low-entry-end-local-time HH:MM] [--cron-interval-hours N] [--cron-minute N] [--fill-slippage N] [--min-executable-edge N]
+  weather:backtest:replay --start ISO [--end ISO | --days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--max-per-trade N] [--max-buy-spend-fraction N] [--max-group-fraction N] [--target-cash-reserve N] [--sell-threshold N] [--settlement-lag-hours N] [--kelly-multiplier N] [--max-kelly-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--price-history-path PATH] [--fetch-price-history] [--strict] [--high-entry-start-local-time HH:MM] [--high-entry-end-local-time HH:MM] [--low-entry-start-local-time HH:MM] [--low-entry-end-local-time HH:MM] [--cron-interval-hours N] [--cron-minute N]
   weather:resolution-audit [--date YYYY-MM-DD | --days-ahead N] [--status active|closed] [--distance-ok-km N] [--distance-warn-km N] [--top N]
   weather:reinvest [--execute] [--pause-buys] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--max-buy-spend-usd N] [--max-buy-spend-fraction N] [--min-edge N] [--min-cash-to-reinvest N] [--target-cash-reserve N] [--min-confidence low|medium|high] [--require-recent-audit-positive] [--audit-lookback-hours N] [--audit-min-positions N] [--no-calibration] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--high-entry-start-local-time HH:MM] [--high-entry-end-local-time HH:MM] [--low-entry-start-local-time HH:MM] [--low-entry-end-local-time HH:MM] [--max-model-run-age-hours N] [--report-path PATH]
   weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N]
@@ -1736,6 +1770,95 @@ async function run(): Promise<void> {
         displayedTrades: Math.min(top, report.trades.length),
         omittedTrades: Math.max(0, report.trades.length - top),
         trades: report.trades.slice(0, top).map(compactWeatherBacktestTrade)
+      });
+    return;
+  }
+
+  if (command === "weather:backtest:replay") {
+    rejectArgs(
+      args,
+      ["entry-start-local-time", "entry-end-local-time"],
+      "were replaced by explicit high/low entry-window flags."
+    );
+    const report = await runWeatherReplayBacktest(config, {
+      startTime: requiredStringArg(args, "start"),
+      endTime: stringArg(args, "end", false),
+      days: numberArg(args, "days", false),
+      initialBankrollUsd: numberArg(args, "bankroll", false),
+      minEdge: numberArg(args, "min-edge", false),
+      minTradePrice: numberArg(args, "min-trade-price", false),
+      maxPerTradeUsd: numberArg(args, "max-per-trade", false) ?? numberArg(args, "max-usd", false),
+      maxBuySpendFraction: numberArg(args, "max-buy-spend-fraction", false),
+      maxGroupFraction: numberArg(args, "max-group-fraction", false),
+      targetCashReserveUsd: numberArg(args, "target-cash-reserve", false),
+      sellThreshold: numberArg(args, "sell-threshold", false),
+      settlementLagHours: numberArg(args, "settlement-lag-hours", false),
+      kellyMultiplier: numberArg(args, "kelly-multiplier", false),
+      maxKellyFraction: numberArg(args, "max-kelly-fraction", false),
+      portfolioStepUsd: numberArg(args, "portfolio-step-usd", false),
+      maxStalenessHours: numberArg(args, "max-staleness-hours", false),
+      sources: previousRunSourcesArg(args),
+      leadDays: numberArg(args, "lead-days", false),
+      limit: numberArg(args, "limit", false),
+      maxPages: numberArg(args, "max-pages", false),
+      priceHistoryPath: stringArg(args, "price-history-path", false),
+      fetchPriceHistory: args["fetch-price-history"] === true,
+      priceHistoryConcurrency: numberArg(args, "price-history-concurrency", false),
+      strictData: args.strict === true,
+      calibrationHalfLifeDays: numberArg(args, "calibration-half-life-days", false),
+      cityBiasPriorWeight: numberArg(args, "city-bias-prior-weight", false),
+      highEntryStartLocalMinutes: localTimeMinutesArg(args, "high-entry-start-local-time"),
+      highEntryEndLocalMinutes: localTimeMinutesArg(args, "high-entry-end-local-time"),
+      lowEntryStartLocalMinutes: localTimeMinutesArg(args, "low-entry-start-local-time"),
+      lowEntryEndLocalMinutes: localTimeMinutesArg(args, "low-entry-end-local-time"),
+      cronIntervalHours: numberArg(args, "cron-interval-hours", false),
+      cronMinute: numberArg(args, "cron-minute", false)
+    });
+    const top = Math.max(1, Math.trunc(numberArg(args, "top", false) ?? 50));
+    print(args.raw === true
+      ? report
+      : {
+        startTime: report.startTime,
+        endTime: report.endTime,
+        initialBankrollUsd: round(report.initialBankrollUsd, 2),
+        finalAccountValueUsd: round(report.summary.finalAccountValueUsd, 2),
+        markToMarketPnlUsd: round(report.summary.markToMarketPnlUsd, 2),
+        realizedPnlUsd: round(report.summary.realizedPnlUsd, 2),
+        roi: round(report.summary.roi, 4),
+        maxDrawdownUsd: round(report.summary.maxDrawdownUsd, 2),
+        maxDrawdownPct: round(report.summary.maxDrawdownPct, 4),
+        options: report.options,
+        data: report.data,
+        summary: {
+          ...report.summary,
+          finalCashUsd: round(report.summary.finalCashUsd, 2),
+          finalOpenValueUsd: round(report.summary.finalOpenValueUsd, 2),
+          finalAccountValueUsd: round(report.summary.finalAccountValueUsd, 2),
+          realizedPnlUsd: round(report.summary.realizedPnlUsd, 2),
+          markToMarketPnlUsd: round(report.summary.markToMarketPnlUsd, 2),
+          roi: round(report.summary.roi, 4),
+          maxDrawdownUsd: round(report.summary.maxDrawdownUsd, 2),
+          maxDrawdownPct: round(report.summary.maxDrawdownPct, 4),
+          grossBoughtUsd: round(report.summary.grossBoughtUsd, 2),
+          grossSoldUsd: round(report.summary.grossSoldUsd, 2),
+          grossSettledUsd: round(report.summary.grossSettledUsd, 2)
+        },
+        displayedEvents: Math.min(top, report.events.length),
+        omittedEvents: Math.max(0, report.events.length - top),
+        events: report.events.slice(0, top).map(compactWeatherReplayEvent),
+        openPositions: report.openPositions.map((position) => ({
+          ...position,
+          shares: round(position.shares, 4),
+          costUsd: round(position.costUsd, 2),
+          averagePrice: round(position.averagePrice),
+          lastMarkedPrice: round(position.lastMarkedPrice)
+        })),
+        lastEquityPoints: report.equityCurve.slice(-10).map((point) => ({
+          ...point,
+          cashUsd: round(point.cashUsd, 2),
+          openValueUsd: round(point.openValueUsd, 2),
+          accountValueUsd: round(point.accountValueUsd, 2)
+        }))
       });
     return;
   }

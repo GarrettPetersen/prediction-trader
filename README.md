@@ -27,6 +27,8 @@ live execution difficult to trigger by accident.
   JSONL ledger for audit and PnL reconstruction.
 - Runs an optional scheduled Vistadex WeatherEdge reinvestment loop through
   GitHub Actions.
+- Replays the WeatherEdge loop over historical weather markets with cash,
+  positions, 0.99 sell-downs, and three-hour reinvestment cadence.
 - Requires explicit live-trading gates before any command can submit a trade.
 - Keeps wallet keys and API credentials out of source control.
 
@@ -240,6 +242,7 @@ positions can still run when the freshness gate blocks buys.
 WeatherEdge research notes:
 
 - [Seven-day weather backtest, 2026-06-24 to 2026-06-30](docs/weather-edge-backtest-2026-06-24-to-30.md)
+- [WeatherEdge fix history and audit cutoffs](docs/weatheredge-fix-history.md)
 
 Pull all applicable sources for Vancouver:
 
@@ -881,6 +884,48 @@ backtest still infers NO prices as `1 - YES` before slippage and does not yet
 model full order-book depth, fees, or liquidity caps. Use `--min-trade-price`
 to exclude very cheap contracts while we are still using price-history fills
 instead of full order-book simulation.
+
+Replay the actual rolling WeatherEdge loop over historical markets:
+
+```bash
+npm run weather:backtest:replay -- \
+  --start 2026-06-01T19:17:00.000Z \
+  --days 30 \
+  --bankroll 100 \
+  --min-edge 0.20 \
+  --max-per-trade 10 \
+  --max-buy-spend-fraction 1 \
+  --max-group-fraction 0.25 \
+  --target-cash-reserve 20 \
+  --sell-threshold 0.99 \
+  --settlement-lag-hours 6 \
+  --fetch-price-history
+```
+
+The replay starts with cash, advances on the same three-hour cron cadence as the
+scheduled trader, sells open positions when their executable proxy price reaches
+`--sell-threshold`, settles resolved markets into cash, and re-sizes new buys
+with the city/date/measure portfolio optimizer. It uses the live timing rule:
+low-temperature markets are eligible only around midday on the previous local
+day, and high-temperature markets are eligible only near local midnight on the
+previous day. Settlement does not use Gamma `eventEndDate` as a redemption
+timestamp; it waits until the target station's local day has ended plus
+`--settlement-lag-hours`, because daily high/low markets are not knowable at
+market close. A month is a reasonable horizon once
+`data/weather/prices/polymarket-token-price-history.jsonl` has been warmed, but
+the first run may need to download many Polymarket token histories. Use
+`--fetch-price-history` intentionally when warming that cache; without it,
+missing price paths are reported rather than guessed. Add `--strict` when you
+want missing forecasts, station metadata, settlement data, or price histories
+to fail the run immediately.
+
+This replay is closer to our real strategy than `weather:backtest:markets`
+because it models path-dependent cash reuse and 0.99 exits. It still uses
+hourly historical CLOB price samples as fill proxies, infers NO prices as
+`1 - YES`, and does not simulate order-book depth or partial fills. For larger
+bet-sizing experiments, raise `--max-per-trade` and
+`--max-buy-spend-fraction`; the live `$1` cap is a production brake, not a
+model assumption.
 
 The market backtest also reports an `oppositeSummary`. That is the same set of
 forecast-edge candidates and the same dollar sizing, but with the opposite side

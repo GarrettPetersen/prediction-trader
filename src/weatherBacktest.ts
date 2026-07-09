@@ -224,7 +224,7 @@ export interface WeatherBacktestBreakdown {
   oppositeRoi: number | undefined;
 }
 
-interface ClosedWeatherMarket {
+export interface ClosedWeatherMarket {
   eventSlug: string;
   eventTitle: string;
   eventEndDate?: string;
@@ -237,12 +237,12 @@ interface ClosedWeatherMarket {
   resolvedYes?: boolean;
 }
 
-interface PricePoint {
+export interface PricePoint {
   t: number;
   p: number;
 }
 
-interface ForecastTargetMetadata {
+export interface ForecastTargetMetadata {
   timezone?: string;
   countryCode?: string;
   country?: string;
@@ -302,7 +302,7 @@ function looksLikeHkoText(value: string | undefined): boolean {
   return /hong\s*kong\s+observatory|\bhko\b|weather\.gov\.hk/i.test(value ?? "");
 }
 
-function targetForClosedMarket(market: ClosedWeatherMarket): { targetKey: string; stationId?: string } {
+export function targetForClosedMarket(market: ClosedWeatherMarket): { targetKey: string; stationId?: string } {
   const resolution = parseResolutionSource(market.resolutionSource);
   const stationId = resolution.stationId ?? (
     looksLikeHkoText(market.resolutionSource) ||
@@ -329,7 +329,7 @@ function marketResolvesYes(parsed: ParsedWeatherMarket, actualC: number): boolea
   return (lower === undefined || actualC >= lower) && (upper === undefined || actualC < upper);
 }
 
-function bestEntryPriceAtOrBefore(
+export function bestEntryPriceAtOrBefore(
   history: PricePoint[],
   decisionTimeSec: number,
   maxStalenessHours: number
@@ -346,7 +346,7 @@ function bestEntryPriceAtOrBefore(
   };
 }
 
-function addDaysIso(value: string, days: number): string {
+export function addDaysIso(value: string, days: number): string {
   const date = new Date(`${value}T00:00:00Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
@@ -374,7 +374,7 @@ function localDateTimeParts(date: Date, timezone: string): {
   };
 }
 
-function buildForecastTargetMetadataIndex(
+export function buildForecastTargetMetadataIndex(
   records: WeatherPreviousRunForecastRecord[]
 ): Map<string, ForecastTargetMetadata> {
   const index = new Map<string, ForecastTargetMetadata>();
@@ -471,7 +471,7 @@ async function fetchJson(url: URL): Promise<unknown> {
   return response.json();
 }
 
-async function fetchClosedWeatherMarkets(date: string, options: { limit: number; maxPages: number }): Promise<ClosedWeatherMarket[]> {
+export async function fetchClosedWeatherMarkets(date: string, options: { limit: number; maxPages: number }): Promise<ClosedWeatherMarket[]> {
   const markets: ClosedWeatherMarket[] = [];
   const seenMarketKeys = new Set<string>();
   let sawTargetDate = false;
@@ -534,7 +534,7 @@ async function fetchClosedWeatherMarkets(date: string, options: { limit: number;
   return markets;
 }
 
-async function fetchTokenPriceHistory(tokenId: string): Promise<PricePoint[]> {
+export async function fetchTokenPriceHistory(tokenId: string): Promise<PricePoint[]> {
   const url = new URL("/prices-history", "https://clob.polymarket.com");
   url.searchParams.set("market", tokenId);
   url.searchParams.set("interval", "max");
