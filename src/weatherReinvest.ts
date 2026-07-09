@@ -42,6 +42,10 @@ import {
   DEFAULT_LOW_ENTRY_START_MINUTES,
   type WeatherEntryWindowAssessment
 } from "./weatherTradingWindow.js";
+import {
+  fetchOpenMeteoForecastFreshness,
+  type WeatherForecastFreshnessAssessment
+} from "./weatherForecastFreshness.js";
 
 export type WeatherReinvestConfidence = "LOW" | "MEDIUM" | "HIGH";
 
@@ -85,6 +89,7 @@ export interface WeatherReinvestOptions extends Pick<
   highEntryEndLocalMinutes?: number;
   lowEntryStartLocalMinutes?: number;
   lowEntryEndLocalMinutes?: number;
+  maxModelRunAgeHours?: number;
   requireRecentAuditPositive?: boolean;
   auditLookbackHours?: number;
   auditMinPositions?: number;
@@ -151,6 +156,7 @@ export interface WeatherReinvestReport {
   sold: WeatherReinvestTradeResult[];
   bought: WeatherReinvestTradeResult[];
   skipped: WeatherReinvestTradeResult[];
+  forecastFreshness?: WeatherForecastFreshnessAssessment;
   auditGate?: WeatherReinvestAuditGate;
   warnings: string[];
 }
@@ -219,6 +225,14 @@ export function assertReinvestCalibrationEnabled(skipCalibration?: boolean): voi
   if (skipCalibration === true) {
     throw new Error("weather:reinvest requires calibrated historical residuals; --no-calibration is only for diagnostics.");
   }
+}
+
+export function requirePositiveModelRunAgeHours(value: number | undefined): number {
+  const maxAgeHours = value ?? 12;
+  if (!Number.isFinite(maxAgeHours) || maxAgeHours <= 0) {
+    throw new Error("WeatherEdge max model run age must be a positive number of hours.");
+  }
+  return maxAgeHours;
 }
 
 function isWeatherPosition(position: VistadexPosition): boolean {
@@ -887,7 +901,15 @@ export async function runWeatherReinvestment(
   const targetDate = targetDateFromOptions(options);
   const skippedForCash = deployableCashUsd < minCashToReinvestUsd;
   const skippedForAuditGate = auditGate !== undefined && !auditGate.passed;
-  const skippedBeforeScan = pauseBuys || skippedForCash || skippedForAuditGate;
+  const maxModelRunAgeHours = requirePositiveModelRunAgeHours(options.maxModelRunAgeHours);
+  const forecastFreshness = pauseBuys || skippedForCash || skippedForAuditGate
+    ? undefined
+    : await fetchOpenMeteoForecastFreshness(config, {
+      now: options.now,
+      maxRunAgeHours: maxModelRunAgeHours
+    });
+  const skippedForForecastFreshness = forecastFreshness !== undefined && !forecastFreshness.ok;
+  const skippedBeforeScan = pauseBuys || skippedForCash || skippedForAuditGate || skippedForForecastFreshness;
   const edgeReport = skippedBeforeScan
     ? undefined
     : await computeWeatherEdgeReport(config, {
@@ -933,6 +955,8 @@ export async function runWeatherReinvestment(
           ? "Fresh WeatherEdge buys are paused by --pause-buys."
           : skippedForAuditGate
           ? `Recent audit gate blocked new WeatherEdge buys: ${auditGate?.reason}`
+          : skippedForForecastFreshness
+          ? `Forecast freshness gate blocked new WeatherEdge buys: ${forecastFreshness?.reason}`
           : `Deployable cash ${deployableCashUsd.toFixed(2)} after target reserve ${targetCashReserveUsd.toFixed(2)} is below min cash to reinvest ${minCashToReinvestUsd.toFixed(2)}; skipped WeatherEdge scan.`
       }],
       warnings: []
@@ -988,6 +1012,7 @@ export async function runWeatherReinvestment(
     sold: sellResult.sold,
     bought: buyResult.bought,
     skipped: [...sellResult.skipped, ...buyResult.skipped],
+    forecastFreshness,
     auditGate,
     warnings: [
       ...sellResult.warnings,
@@ -1001,6 +1026,9 @@ export async function runWeatherReinvestment(
         : []),
       ...(skippedForAuditGate && auditGate
         ? [`Skipped WeatherEdge scan because recent audited performance failed the market-informed opposite-side gate: ${auditGate.reason}`]
+        : []),
+      ...(skippedForForecastFreshness && forecastFreshness
+        ? [`Skipped WeatherEdge scan because forecast freshness failed: ${forecastFreshness.reason}`]
         : [])
     ]
   };

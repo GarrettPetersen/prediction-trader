@@ -226,6 +226,17 @@ calibration data for them. Pass `--no-calibration` only for diagnostics; the
 uncalibrated path is not the production strategy and `weather:reinvest` refuses
 to run with it.
 
+For live day-ahead trading, `weather:reinvest` also checks Open-Meteo model
+metadata before opening new positions. It uses `ncep_gfs013` as the metadata
+clock for `openmeteo_gfs`, `ecmwf_ifs025` for `openmeteo_ecmwf`, and
+`ukmo_global_deterministic_10km` for `openmeteo_ukmo`. Open-Meteo says global
+models normally update every six hours, but each model becomes available at a
+different time. The live loop requires all three sources to share the same
+initialization cycle, waits until the latest `last_run_availability_time` plus
+Open-Meteo's recommended ten-minute buffer, and skips buys if that common run
+is older than `--max-model-run-age-hours` defaulting to `12`. Sells of locked
+positions can still run when the freshness gate blocks buys.
+
 WeatherEdge research notes:
 
 - [Seven-day weather backtest, 2026-06-24 to 2026-06-30](docs/weather-edge-backtest-2026-06-24-to-30.md)
@@ -511,6 +522,7 @@ npm run weather:reinvest -- \
   --high-entry-end-local-time 23:30 \
   --low-entry-start-local-time 11:00 \
   --low-entry-end-local-time 14:30 \
+  --max-model-run-age-hours 12 \
   --report-path data/trades/weatheredge-report.json
 ```
 
@@ -522,8 +534,11 @@ inside each market's station-local day-ahead entry window. By default high
 temperature markets enter `20:00-23:30` on the local calendar day before the
 target date, while low temperature markets enter `11:00-14:30` on the previous
 day. Cash freed outside the matching window is held until a later scheduled
-run. The loop does not touch Polymarket. Add `--execute` only after
-`PREDICTION_TRADER_LIVE=1` is set and the dry-run report looks sane.
+run. The loop then checks source freshness before scanning markets: fresh buys
+require a common usable Open-Meteo GFS/ECMWF/UKMO model cycle, and the report
+records the exact model initialization and usability timestamps under
+`forecastFreshness`. The loop does not touch Polymarket. Add `--execute` only
+after `PREDICTION_TRADER_LIVE=1` is set and the dry-run report looks sane.
 
 `--pause-buys` leaves the sell side active, so locked weather positions can
 still be liquidated, but it skips the fresh market/forecast scan and opens no
@@ -592,6 +607,7 @@ WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME=20:00
 WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME=23:30
 WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME=11:00
 WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME=14:30
+WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS=12
 WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS=
 WEATHEREDGE_CITY_BIAS_PRIOR_WEIGHT=
 PREDICTION_TRADER_MAX_USD=10
@@ -621,9 +637,14 @@ positions, but it opens fresh high-temperature positions only inside
 `WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME`, and fresh low-temperature positions
 only inside `WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME` through
 `WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME`, on the day before the target date. It
-restores and saves `.cache/weatheredge` and `data/weather` with `actions/cache`
-so calibration datasets and implementation caches survive between runs once
-seeded. It also uploads `data/trades/ledger.jsonl` and
+also blocks buys until Open-Meteo metadata shows GFS, ECMWF, and UKMO on one
+usable common model cycle, and it refuses to buy if that cycle is older than
+`WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS`. This means some three-hour ticks are
+expected no-ops: they may be in the right station-local window but still before
+the slowest upstream model has landed. It restores and saves
+`.cache/weatheredge` and `data/weather` with `actions/cache` so calibration
+datasets and implementation caches survive between runs once seeded. It also
+uploads `data/trades/ledger.jsonl` and
 `data/trades/weatheredge-report.json` as run artifacts.
 
 The ignored `data/weather/**/*.jsonl` datasets are required for calibrated live

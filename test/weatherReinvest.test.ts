@@ -4,6 +4,7 @@ import {
   assertReinvestCalibrationEnabled,
   deployableWeatherCash,
   evaluateReinvestAuditGate,
+  requirePositiveModelRunAgeHours,
   requireReinvestMinEdge
 } from "../src/weatherReinvest.js";
 
@@ -16,6 +17,19 @@ describe("weather reinvestment cash reserve", () => {
 
   it("treats negative reserve inputs as zero", () => {
     assert.equal(deployableWeatherCash(12.34, -5), 12.34);
+  });
+});
+
+describe("weather reinvestment forecast freshness age", () => {
+  it("defaults to a 12 hour max model run age", () => {
+    assert.equal(requirePositiveModelRunAgeHours(undefined), 12);
+  });
+
+  it("rejects invalid max model run ages", () => {
+    assert.throws(
+      () => requirePositiveModelRunAgeHours(0),
+      /positive number/
+    );
   });
 });
 

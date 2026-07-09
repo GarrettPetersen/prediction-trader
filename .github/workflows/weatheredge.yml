@@ -38,6 +38,7 @@ jobs:
       WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME: ${{ vars.WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME || '23:30' }}
       WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME: ${{ vars.WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME || '11:00' }}
       WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME: ${{ vars.WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME || '14:30' }}
+      WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS: ${{ vars.WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS || '12' }}
       WEATHEREDGE_REQUIRE_RECENT_AUDIT_POSITIVE: ${{ vars.WEATHEREDGE_REQUIRE_RECENT_AUDIT_POSITIVE || 'true' }}
       WEATHEREDGE_AUDIT_LOOKBACK_HOURS: ${{ vars.WEATHEREDGE_AUDIT_LOOKBACK_HOURS || '72' }}
       WEATHEREDGE_AUDIT_MIN_POSITIONS: ${{ vars.WEATHEREDGE_AUDIT_MIN_POSITIONS || '5' }}
@@ -131,7 +132,7 @@ jobs:
             exit 1
           fi
 
-          ARGS="--days-ahead 1 --max-per-trade ${WEATHEREDGE_MAX_PER_TRADE} --max-buys ${WEATHEREDGE_MAX_BUYS} --max-group-fraction ${WEATHEREDGE_MAX_GROUP_FRACTION} --kelly-multiplier ${WEATHEREDGE_KELLY_MULTIPLIER} --max-kelly-fraction ${WEATHEREDGE_MAX_KELLY_FRACTION} --min-edge ${WEATHEREDGE_MIN_EDGE} --min-confidence ${WEATHEREDGE_MIN_CONFIDENCE} --min-cash-to-reinvest ${WEATHEREDGE_MIN_CASH_TO_REINVEST} --target-cash-reserve ${WEATHEREDGE_TARGET_CASH_RESERVE} --high-entry-start-local-time ${WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME} --high-entry-end-local-time ${WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME} --low-entry-start-local-time ${WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME} --low-entry-end-local-time ${WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME} --report-path data/trades/weatheredge-report.json"
+          ARGS="--days-ahead 1 --max-per-trade ${WEATHEREDGE_MAX_PER_TRADE} --max-buys ${WEATHEREDGE_MAX_BUYS} --max-group-fraction ${WEATHEREDGE_MAX_GROUP_FRACTION} --kelly-multiplier ${WEATHEREDGE_KELLY_MULTIPLIER} --max-kelly-fraction ${WEATHEREDGE_MAX_KELLY_FRACTION} --min-edge ${WEATHEREDGE_MIN_EDGE} --min-confidence ${WEATHEREDGE_MIN_CONFIDENCE} --min-cash-to-reinvest ${WEATHEREDGE_MIN_CASH_TO_REINVEST} --target-cash-reserve ${WEATHEREDGE_TARGET_CASH_RESERVE} --high-entry-start-local-time ${WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME} --high-entry-end-local-time ${WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME} --low-entry-start-local-time ${WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME} --low-entry-end-local-time ${WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME} --max-model-run-age-hours ${WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS} --report-path data/trades/weatheredge-report.json"
 
           if [ -n "${WEATHEREDGE_BANKROLL}" ]; then
             ARGS="${ARGS} --bankroll ${WEATHEREDGE_BANKROLL}"
