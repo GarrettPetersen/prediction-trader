@@ -16,7 +16,7 @@ describe("WeatherEdge cron schedule", () => {
         DEFAULT_WEATHER_CRON_HOUR_OFFSET
       ));
 
-    assert.deepEqual(hours, [1, 4, 7, 10, 13, 16, 19, 22]);
-    assert.equal(DEFAULT_WEATHER_CRON_MINUTE, 47);
+    assert.deepEqual(hours, [2, 5, 8, 11, 14, 17, 20, 23]);
+    assert.equal(DEFAULT_WEATHER_CRON_MINUTE, 15);
   });
 });

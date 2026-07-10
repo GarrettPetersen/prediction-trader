@@ -544,8 +544,8 @@ records the exact model initialization and usability timestamps under
 `forecastFreshness`. The loop does not touch Polymarket. Add `--execute` only
 after `PREDICTION_TRADER_LIVE=1` is set and the dry-run report looks sane.
 
-The GitHub Actions schedule runs at `01:47, 04:47, 07:47, 10:47, 13:47,
-16:47, 19:47, 22:47 UTC`. Open-Meteo's GFS metadata typically advances before
+The GitHub Actions schedule runs at `02:15, 05:15, 08:15, 11:15, 14:15,
+17:15, 20:15, 23:15 UTC`. Open-Meteo's GFS metadata typically advances before
 ECMWF and UKMO, so the first run in each six-hour pair is timed after all three
 models normally expose the same initialization cycle; the second preserves the
 three-hour sell/redeployment cadence. Publication times can move, and GitHub
@@ -588,7 +588,7 @@ and `--max-buy-spend-fraction 0.05` caps new deployment for that run at `$6.65`.
 ### GitHub Actions Weather Loop
 
 The repo includes `.github/workflows/weatheredge.yml`, scheduled every three
-hours at minute 47 with a `01:00 UTC` hour offset. It is dry-run by default. To
+hours at minute 15 with a `02:00 UTC` hour offset. It is dry-run by default. To
 allow live Vistadex weather trading, configure repository secrets:
 
 ```text
@@ -858,8 +858,8 @@ npm run weather:backtest:markets -- \
   --low-entry-start-local-time 11:00 \
   --low-entry-end-local-time 14:30 \
   --cron-interval-hours 3 \
-  --cron-hour-offset 1 \
-  --cron-minute 47 \
+  --cron-hour-offset 2 \
+  --cron-minute 15 \
   --fill-slippage 0.02 \
   --min-executable-edge 0.03
 ```
@@ -898,7 +898,7 @@ Replay the actual rolling WeatherEdge loop over historical markets:
 
 ```bash
 npm run weather:backtest:replay -- \
-  --start 2026-06-01T19:47:00.000Z \
+  --start 2026-06-01T20:15:00.000Z \
   --days 30 \
   --bankroll 100 \
   --min-edge 0.20 \

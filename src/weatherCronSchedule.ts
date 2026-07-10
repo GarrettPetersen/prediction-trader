@@ -1,6 +1,6 @@
 export const DEFAULT_WEATHER_CRON_INTERVAL_HOURS = 3;
-export const DEFAULT_WEATHER_CRON_HOUR_OFFSET = 1;
-export const DEFAULT_WEATHER_CRON_MINUTE = 47;
+export const DEFAULT_WEATHER_CRON_HOUR_OFFSET = 2;
+export const DEFAULT_WEATHER_CRON_MINUTE = 15;
 
 export function utcHourMatchesWeatherCron(
   utcHour: number,
