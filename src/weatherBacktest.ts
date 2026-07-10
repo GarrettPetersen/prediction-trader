@@ -34,6 +34,12 @@ import {
   sizeBinaryKellyPortfolio
 } from "./kelly.js";
 import {
+  DEFAULT_WEATHER_CRON_HOUR_OFFSET,
+  DEFAULT_WEATHER_CRON_INTERVAL_HOURS,
+  DEFAULT_WEATHER_CRON_MINUTE,
+  utcHourMatchesWeatherCron
+} from "./weatherCronSchedule.js";
+import {
   optimizeWeatherPortfolio,
   type WeatherPortfolioCandidate
 } from "./weatherPortfolioOptimizer.js";
@@ -78,6 +84,7 @@ export interface WeatherMarketBacktestOptions {
   lowEntryStartLocalMinutes?: number;
   lowEntryEndLocalMinutes?: number;
   cronIntervalHours?: number;
+  cronHourOffset?: number;
   cronMinute?: number;
   fillSlippage?: number;
   minExecutableEdge?: number;
@@ -197,6 +204,7 @@ export interface WeatherMarketBacktestReport {
     fillSlippage: number;
     minExecutableEdge: number;
     cronIntervalHours?: number;
+    cronHourOffset?: number;
     cronMinute?: number;
     highEntryStartLocalMinutes?: number;
     highEntryEndLocalMinutes?: number;
@@ -398,6 +406,7 @@ function cronEntryDecisionTimeMs(input: {
   entryStartLocalMinutes: number;
   entryEndLocalMinutes: number;
   cronIntervalHours: number;
+  cronHourOffset: number;
   cronMinute: number;
 }): number | undefined {
   const entryDate = addDaysIso(input.targetDate, -1);
@@ -410,7 +419,7 @@ function cronEntryDecisionTimeMs(input: {
   for (let t = searchStart; t <= searchEnd; t += 3_600_000) {
     const date = new Date(t);
     if (date.getUTCMinutes() !== 0) continue;
-    if (date.getUTCHours() % interval !== 0) continue;
+    if (!utcHourMatchesWeatherCron(date.getUTCHours(), interval, input.cronHourOffset)) continue;
     const tick = t + minute * 60_000;
     const local = localDateTimeParts(new Date(tick), input.timezone);
     if (
@@ -436,6 +445,7 @@ function backtestDecisionTime(input: {
   lowEntryStartLocalMinutes: number;
   lowEntryEndLocalMinutes: number;
   cronIntervalHours: number;
+  cronHourOffset: number;
   cronMinute: number;
 }): BacktestDecisionTime | undefined {
   if (input.entryMode === "event_end_minus_lead") {
@@ -456,6 +466,7 @@ function backtestDecisionTime(input: {
     entryStartLocalMinutes: isLowMarket ? input.lowEntryStartLocalMinutes : input.highEntryStartLocalMinutes,
     entryEndLocalMinutes: isLowMarket ? input.lowEntryEndLocalMinutes : input.highEntryEndLocalMinutes,
     cronIntervalHours: input.cronIntervalHours,
+    cronHourOffset: input.cronHourOffset,
     cronMinute: input.cronMinute
   });
   return decisionTimeMs === undefined
@@ -669,8 +680,9 @@ export async function runWeatherMarketBacktest(
   const lowEntryEndLocalMinutes = options.lowEntryEndLocalMinutes ?? DEFAULT_LOW_ENTRY_END_MINUTES;
   assertWeatherEntryWindowMinutes("temperature_high", highEntryStartLocalMinutes, highEntryEndLocalMinutes);
   assertWeatherEntryWindowMinutes("temperature_low", lowEntryStartLocalMinutes, lowEntryEndLocalMinutes);
-  const cronIntervalHours = Math.max(1, Math.trunc(options.cronIntervalHours ?? 3));
-  const cronMinute = Math.max(0, Math.min(59, Math.trunc(options.cronMinute ?? 17)));
+  const cronIntervalHours = Math.max(1, Math.trunc(options.cronIntervalHours ?? DEFAULT_WEATHER_CRON_INTERVAL_HOURS));
+  const cronHourOffset = Math.trunc(options.cronHourOffset ?? DEFAULT_WEATHER_CRON_HOUR_OFFSET);
+  const cronMinute = Math.max(0, Math.min(59, Math.trunc(options.cronMinute ?? DEFAULT_WEATHER_CRON_MINUTE)));
   const fillSlippage = Math.max(0, options.fillSlippage ?? 0);
   const minExecutableEdge = Math.max(0, options.minExecutableEdge ?? 0);
   const maxPerTradeUsd = options.maxPerTradeUsd === undefined
@@ -723,6 +735,7 @@ export async function runWeatherMarketBacktest(
       lowEntryStartLocalMinutes,
       lowEntryEndLocalMinutes,
       cronIntervalHours,
+      cronHourOffset,
       cronMinute
     });
     if (!decision) return { market, target };
@@ -998,6 +1011,7 @@ export async function runWeatherMarketBacktest(
       fillSlippage,
       minExecutableEdge,
       cronIntervalHours: entryMode === "cron_entry_window" ? cronIntervalHours : undefined,
+      cronHourOffset: entryMode === "cron_entry_window" ? cronHourOffset : undefined,
       cronMinute: entryMode === "cron_entry_window" ? cronMinute : undefined,
       highEntryStartLocalMinutes: entryMode === "cron_entry_window" ? highEntryStartLocalMinutes : undefined,
       highEntryEndLocalMinutes: entryMode === "cron_entry_window" ? highEntryEndLocalMinutes : undefined,

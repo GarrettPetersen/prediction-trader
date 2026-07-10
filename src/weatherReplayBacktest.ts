@@ -27,6 +27,12 @@ import {
   DEFAULT_LOW_ENTRY_START_MINUTES
 } from "./weatherTradingWindow.js";
 import {
+  DEFAULT_WEATHER_CRON_HOUR_OFFSET,
+  DEFAULT_WEATHER_CRON_INTERVAL_HOURS,
+  DEFAULT_WEATHER_CRON_MINUTE,
+  utcHourMatchesWeatherCron
+} from "./weatherCronSchedule.js";
+import {
   DEFAULT_CALIBRATION_HALF_LIFE_DAYS,
   DEFAULT_CITY_BIAS_PRIOR_WEIGHT,
   buildCalibratedForecastIndex,
@@ -76,6 +82,7 @@ export interface WeatherReplayBacktestOptions {
   lowEntryStartLocalMinutes?: number;
   lowEntryEndLocalMinutes?: number;
   cronIntervalHours?: number;
+  cronHourOffset?: number;
   cronMinute?: number;
 }
 
@@ -140,6 +147,7 @@ export interface WeatherReplayBacktestReport {
     leadDays: number;
     sources: string[];
     cronIntervalHours: number;
+    cronHourOffset: number;
     cronMinute: number;
     highEntryStartLocalMinutes: number;
     highEntryEndLocalMinutes: number;
@@ -474,24 +482,35 @@ function openExposureForGroup(positions: ReplayPosition[], groupKey: string): nu
     .reduce((sum, position) => sum + position.costUsd, 0);
 }
 
-function nextCronTickMs(startTimeMs: number, intervalHours: number, cronMinute: number): number {
+function nextCronTickMs(
+  startTimeMs: number,
+  intervalHours: number,
+  hourOffset: number,
+  cronMinute: number
+): number {
   const interval = Math.max(1, Math.trunc(intervalHours));
   const minute = Math.max(0, Math.min(59, Math.trunc(cronMinute)));
   const floorHour = Math.floor(startTimeMs / 3_600_000) * 3_600_000;
   for (let timeMs = floorHour - interval * 3_600_000; timeMs <= startTimeMs + interval * 3_600_000; timeMs += 3_600_000) {
     const date = new Date(timeMs);
     if (date.getUTCMinutes() !== 0) continue;
-    if (date.getUTCHours() % interval !== 0) continue;
+    if (!utcHourMatchesWeatherCron(date.getUTCHours(), interval, hourOffset)) continue;
     const tickMs = timeMs + minute * 60_000;
     if (tickMs >= startTimeMs) return tickMs;
   }
   throw new Error("Could not compute first replay cron tick.");
 }
 
-function replayTicks(startTimeMs: number, endTimeMs: number, intervalHours: number, cronMinute: number): number[] {
+function replayTicks(
+  startTimeMs: number,
+  endTimeMs: number,
+  intervalHours: number,
+  hourOffset: number,
+  cronMinute: number
+): number[] {
   const ticks: number[] = [];
   const intervalMs = Math.max(1, Math.trunc(intervalHours)) * 3_600_000;
-  for (let tick = nextCronTickMs(startTimeMs, intervalHours, cronMinute); tick <= endTimeMs; tick += intervalMs) {
+  for (let tick = nextCronTickMs(startTimeMs, intervalHours, hourOffset, cronMinute); tick <= endTimeMs; tick += intervalMs) {
     ticks.push(tick);
   }
   return ticks;
@@ -742,6 +761,7 @@ interface RequiredReplayOptions {
   lowEntryStartLocalMinutes: number;
   lowEntryEndLocalMinutes: number;
   cronIntervalHours: number;
+  cronHourOffset: number;
   cronMinute: number;
 }
 
@@ -795,8 +815,18 @@ function normalizeOptions(options: WeatherReplayBacktestOptions): {
       highEntryEndLocalMinutes,
       lowEntryStartLocalMinutes,
       lowEntryEndLocalMinutes,
-      cronIntervalHours: Math.max(1, Math.trunc(assertFiniteNumber(options.cronIntervalHours ?? 3, "--cron-interval-hours"))),
-      cronMinute: Math.max(0, Math.min(59, Math.trunc(assertFiniteNumber(options.cronMinute ?? 17, "--cron-minute"))))
+      cronIntervalHours: Math.max(1, Math.trunc(assertFiniteNumber(
+        options.cronIntervalHours ?? DEFAULT_WEATHER_CRON_INTERVAL_HOURS,
+        "--cron-interval-hours"
+      ))),
+      cronHourOffset: Math.trunc(assertFiniteNumber(
+        options.cronHourOffset ?? DEFAULT_WEATHER_CRON_HOUR_OFFSET,
+        "--cron-hour-offset"
+      )),
+      cronMinute: Math.max(0, Math.min(59, Math.trunc(assertFiniteNumber(
+        options.cronMinute ?? DEFAULT_WEATHER_CRON_MINUTE,
+        "--cron-minute"
+      ))))
     }
   };
 }
@@ -1117,6 +1147,7 @@ export async function runWeatherReplayBacktest(
     normalized.startTimeMs,
     normalized.endTimeMs,
     options.cronIntervalHours,
+    options.cronHourOffset,
     options.cronMinute
   );
   if (ticks.length === 0) {
@@ -1270,6 +1301,7 @@ export async function runWeatherReplayBacktest(
       leadDays: options.leadDays,
       sources: options.sources,
       cronIntervalHours: options.cronIntervalHours,
+      cronHourOffset: options.cronHourOffset,
       cronMinute: options.cronMinute,
       highEntryStartLocalMinutes: options.highEntryStartLocalMinutes,
       highEntryEndLocalMinutes: options.highEntryEndLocalMinutes,
