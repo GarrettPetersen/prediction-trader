@@ -136,7 +136,8 @@ function recordFromPolymarketPosition(position: PolymarketPosition): LedgerRecor
 }
 
 function recordFromVistadexPosition(position: VistadexPosition): LedgerRecord {
-  const price = position.price?.midpoint;
+  const isTradable = position.status === "active" && position.closed !== true;
+  const price = isTradable ? position.price?.midpoint : undefined;
   const shares = ledgerNumber(position.balance);
   const key = [
     "vistadex:position",
@@ -144,14 +145,15 @@ function recordFromVistadexPosition(position: VistadexPosition): LedgerRecord {
     position.outcomeIndex,
     position.balance,
     price,
-    position.status
+    position.status,
+    position.closed === true ? "closed" : "open"
   ].join(":");
 
   return buildBackfillLedgerRecord({
     venue: "vistadex",
     action: "position_snapshot",
     dedupeKey: key,
-    status: position.status ?? (position.closed ? "closed" : "open"),
+    status: position.closed === true ? "closed" : position.status ?? "open",
     price,
     shares,
     notionalUsd: price !== undefined && shares !== undefined ? price * shares : undefined,

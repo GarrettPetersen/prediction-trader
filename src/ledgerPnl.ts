@@ -363,21 +363,22 @@ export function markFromVistadexPosition(position: VistadexPosition): LedgerPosi
   if (!Number.isFinite(shares)) {
     throw new Error(`Invalid Vistadex position balance for ${position.slug ?? position.conditionId ?? key}: ${position.balance}`);
   }
-  const midPrice = position.status === "active" ? position.price?.midpoint : undefined;
-  const bidPrice = position.status === "active" ? position.price?.bestBid : undefined;
-  const askPrice = position.status === "active" ? position.price?.bestAsk : undefined;
+  const isTradable = position.status === "active" && position.closed !== true;
+  const midPrice = isTradable ? position.price?.midpoint : undefined;
+  const bidPrice = isTradable ? position.price?.bestBid : undefined;
+  const askPrice = isTradable ? position.price?.bestAsk : undefined;
 
   return {
     venue: "vistadex",
     key,
     market,
-    status: position.status,
-    shares: position.status === "active" ? shares : 0,
+    status: position.closed === true ? "closed" : position.status,
+    shares: isTradable ? shares : 0,
     midPrice,
     bidPrice,
     askPrice,
-    midValueUsd: position.status === "active" && midPrice !== undefined ? shares * midPrice : 0,
-    bidValueUsd: position.status === "active" && bidPrice !== undefined ? shares * bidPrice : 0
+    midValueUsd: isTradable && midPrice !== undefined ? shares * midPrice : 0,
+    bidValueUsd: isTradable && bidPrice !== undefined ? shares * bidPrice : 0
   };
 }
 

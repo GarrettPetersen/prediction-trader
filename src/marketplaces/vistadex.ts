@@ -52,6 +52,23 @@ export interface VistadexUSDCBalanceSnapshot {
   cashUsd: string;
 }
 
+export interface VistadexTradeQuote {
+  rfqId?: string;
+  walletAddress?: string;
+  auctionDurationMs?: number;
+  auctionEndTime?: number;
+  hasQuote: boolean;
+  quote: {
+    filler?: string;
+    pricePerShare?: number;
+    shares?: number;
+    totalUsd?: number;
+  } | null;
+  summary?: unknown;
+  feeRateBps?: number;
+  unsignedTransaction?: string | null;
+}
+
 export interface VistadexPublicUser {
   username: string;
   walletAddress?: string;
@@ -205,7 +222,7 @@ async function fetchVistadexAppJson<T>(config: AppConfig, path: string, params?:
   return body as T;
 }
 
-function sanitizeVistadexQuoteResult(response: any) {
+function sanitizeVistadexQuoteResult(response: any, options: { includeUnsignedTransaction?: boolean } = {}): VistadexTradeQuote {
   return {
     rfqId: response?.rfqId,
     walletAddress: response?.walletAddress,
@@ -221,7 +238,8 @@ function sanitizeVistadexQuoteResult(response: any) {
         }
       : null,
     summary: response?.summary,
-    feeRateBps: response?.feeRateBps
+    feeRateBps: response?.feeRateBps,
+    unsignedTransaction: options.includeUnsignedTransaction ? response?.unsignedTransaction : undefined
   };
 }
 
@@ -407,6 +425,14 @@ export async function quoteVistadexTrade(
   config: AppConfig,
   ticket: VistadexTradeTicket
 ): Promise<unknown> {
+  const { unsignedTransaction: _unsignedTransaction, ...safeQuote } = await createVistadexTradeQuote(config, ticket);
+  return safeQuote;
+}
+
+export async function createVistadexTradeQuote(
+  config: AppConfig,
+  ticket: VistadexTradeTicket
+): Promise<VistadexTradeQuote> {
   const { client, mod } = await createVistadexClient(config);
   const wallet = await loadWallet(config);
   const collateralMint = ticket.collateralMint ?? (mod as any).USDC_MINT;
@@ -421,9 +447,10 @@ export async function quoteVistadexTrade(
       usdAmount: ticket.side === "buy" ? ticket.amountUsd : undefined,
       shareAmount: ticket.side === "sell" ? ticket.shares : undefined,
       orderType: ticket.limitPrice === undefined ? "market" : "limit",
-      limitPrice: ticket.limitPrice
+      limitPrice: ticket.limitPrice,
+      quoteTimeoutMs: ticket.quoteTimeoutMs
     });
-  return sanitizeVistadexQuoteResult(response);
+  return sanitizeVistadexQuoteResult(response, { includeUnsignedTransaction: true });
 }
 
 export async function executeVistadexTrade(
@@ -450,7 +477,9 @@ export async function executeVistadexTrade(
       outcomeIndex: ticket.outcomeIndex,
       usdAmount: ticket.amountUsd,
       orderType: ticket.limitPrice === undefined ? "market" : "limit",
-      limitPrice: ticket.limitPrice
+      limitPrice: ticket.limitPrice,
+      quoteTimeoutMs: ticket.quoteTimeoutMs,
+      fillerTimeoutMs: ticket.fillerTimeoutMs
     });
   } else {
     if (ticket.shares === undefined) {
@@ -463,11 +492,49 @@ export async function executeVistadexTrade(
       outcomeIndex: ticket.outcomeIndex,
       shareAmount: ticket.shares,
       orderType: ticket.limitPrice === undefined ? "market" : "limit",
-      limitPrice: ticket.limitPrice
+      limitPrice: ticket.limitPrice,
+      quoteTimeoutMs: ticket.quoteTimeoutMs,
+      fillerTimeoutMs: ticket.fillerTimeoutMs
     });
   }
 
   const details = sanitizeVistadexTradeResult(response);
+  return {
+    venue: "vistadex",
+    status: details.transactionSignature ? "filled" : "submitted",
+    details: details as Record<string, unknown>
+  };
+}
+
+export async function executeVistadexQuotedTrade(
+  config: AppConfig,
+  ticket: VistadexTradeTicket,
+  quote: VistadexTradeQuote
+): Promise<TradeExecution> {
+  if (!quote.rfqId) {
+    throw new Error("Cannot submit Vistadex quote without an rfqId.");
+  }
+  if (!quote.unsignedTransaction) {
+    throw new Error(`Cannot submit Vistadex RFQ ${quote.rfqId}: unsigned transaction is missing.`);
+  }
+
+  const { client } = await createVistadexClient(config);
+  const wallet = await loadWallet(config);
+  const response = await client.submitTrade({
+    rfqId: quote.rfqId,
+    walletAddress: wallet.publicKey.toBase58(),
+    unsignedTransaction: quote.unsignedTransaction,
+    wallet,
+    quoteTimeoutMs: ticket.quoteTimeoutMs,
+    fillerTimeoutMs: ticket.fillerTimeoutMs
+  });
+
+  const details = {
+    ...sanitizeVistadexTradeResult(response),
+    side: ticket.side,
+    winningQuote: quote.quote,
+    feeRateBps: quote.feeRateBps
+  };
   return {
     venue: "vistadex",
     status: details.transactionSignature ? "filled" : "submitted",

@@ -10,13 +10,14 @@ import {
   markFromVistadexPosition
 } from "./ledgerPnl.js";
 import {
-  executeVistadexTrade,
+  createVistadexTradeQuote,
+  executeVistadexQuotedTrade,
   getVistadexEvent,
   getVistadexPositions,
   getVistadexUSDCBalance,
   previewVistadexTrade,
-  quoteVistadexTrade,
-  type VistadexPosition
+  type VistadexPosition,
+  type VistadexTradeQuote
 } from "./marketplaces/vistadex.js";
 import { assertCanExecute } from "./safety.js";
 import type { TradeExecution, VistadexTradeTicket } from "./types.js";
@@ -48,6 +49,11 @@ import {
 } from "./weatherForecastFreshness.js";
 
 export type WeatherReinvestConfidence = "LOW" | "MEDIUM" | "HIGH";
+
+const DEFAULT_VISTADEX_QUOTE_TIMEOUT_MS = 90_000;
+const DEFAULT_VISTADEX_FILLER_TIMEOUT_MS = 120_000;
+const DEFAULT_VISTADEX_EXECUTION_ATTEMPTS = 2;
+const DEFAULT_VISTADEX_RETRY_BACKOFF_MS = 10_000;
 
 export interface WeatherReinvestOptions extends Pick<
   WeatherEdgeReportOptions,
@@ -95,6 +101,10 @@ export interface WeatherReinvestOptions extends Pick<
   requireRecentAuditPositive?: boolean;
   auditLookbackHours?: number;
   auditMinPositions?: number;
+  vistadexQuoteTimeoutMs?: number;
+  vistadexFillerTimeoutMs?: number;
+  vistadexMaxAttempts?: number;
+  vistadexRetryBackoffMs?: number;
   now?: Date;
 }
 
@@ -116,10 +126,12 @@ export interface WeatherReinvestTradeResult {
   side?: "buy" | "sell";
   amountUsd?: number;
   shares?: number;
+  rfqId?: string;
   quote?: WeatherReinvestQuoteDetails;
   fill?: WeatherReinvestQuoteDetails;
   transactionSignature?: string;
   ledger?: AppendLedgerResult;
+  attempts?: WeatherReinvestExecutionAttempt[];
   reason?: string;
   error?: string;
   edge?: number;
@@ -137,6 +149,18 @@ export interface WeatherReinvestTradeResult {
   entryWindow?: WeatherEntryWindowAssessment;
 }
 
+export interface WeatherReinvestExecutionAttempt {
+  attempt: number;
+  maxAttempts: number;
+  startedAt: string;
+  finishedAt: string;
+  rfqId?: string;
+  status: "filled" | "submitted" | "unknown" | "failed";
+  error?: string;
+  retryable?: boolean;
+  nextDelayMs?: number;
+}
+
 export interface WeatherReinvestReport {
   execute: boolean;
   pauseBuys: boolean;
@@ -152,6 +176,12 @@ export interface WeatherReinvestReport {
   deployableCashUsd: number;
   buyCashBudgetUsd: number;
   targetDate: string;
+  vistadexExecution: {
+    quoteTimeoutMs: number;
+    fillerTimeoutMs: number;
+    maxAttempts: number;
+    retryBackoffMs: number;
+  };
   weatherEdge: Pick<
     WeatherEdgeReport,
     "scannedGroups" | "targetGroups" | "pricedGroups" | "timeSkippedGroups" | "erroredGroups" | "marketCount" | "rowCount" | "signalCount" | "errors"
@@ -211,6 +241,41 @@ function numberValue(value: unknown): number | undefined {
 
 function roundUsd(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function positiveInteger(value: number | undefined, fallback: number, label: string): number {
+  const resolved = value ?? fallback;
+  if (!Number.isFinite(resolved) || resolved < 1) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+  return Math.trunc(resolved);
+}
+
+function nonNegativeFinite(value: number | undefined, fallback: number, label: string): number {
+  const resolved = value ?? fallback;
+  if (!Number.isFinite(resolved) || resolved < 0) {
+    throw new Error(`${label} must be a non-negative number.`);
+  }
+  return resolved;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function isRetryableVistadexExecutionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /timed out waiting for filler action|timed out waiting for rfq websocket subscription|websocket closed while waiting for filler action|websocket closed while waiting for auction result|fetch failed|network|socket|econnreset|etimedout|eai_again/i.test(message);
+}
+
+export function vistadexExecutionRetryDelayMs(baseDelayMs: number, attempt: number): number {
+  if (!Number.isFinite(baseDelayMs) || baseDelayMs < 0) {
+    throw new Error("Vistadex retry backoff must be a non-negative number.");
+  }
+  if (!Number.isFinite(attempt) || attempt < 1) {
+    throw new Error("Vistadex retry attempt must be a positive number.");
+  }
+  return Math.round(baseDelayMs * (2 ** Math.max(0, Math.trunc(attempt) - 1)));
 }
 
 export function deployableWeatherCash(cashUsd: number, targetCashReserveUsd = 0): number {
@@ -461,7 +526,7 @@ function tradeCashTotalUsd(trade: WeatherReinvestTradeResult): number | undefine
 function expectedSellProceedsUsd(trades: WeatherReinvestTradeResult[], execute: boolean): number {
   return roundUsd(trades.reduce((sum, trade) => {
     if (trade.status === "filled") return sum + (tradeCashTotalUsd(trade) ?? 0);
-    if (!execute && trade.status === "quoted") return sum + (tradeCashTotalUsd(trade) ?? 0);
+    if (execute && (trade.status === "submitted" || trade.status === "unknown")) return sum + (tradeCashTotalUsd(trade) ?? 0);
     return sum;
   }, 0));
 }
@@ -469,7 +534,7 @@ function expectedSellProceedsUsd(trades: WeatherReinvestTradeResult[], execute: 
 function expectedBuySpendUsd(trades: WeatherReinvestTradeResult[], execute: boolean): number {
   return roundUsd(trades.reduce((sum, trade) => {
     if (trade.status === "filled") return sum + (tradeCashTotalUsd(trade) ?? 0);
-    if (!execute && trade.status === "quoted") return sum + (tradeCashTotalUsd(trade) ?? 0);
+    if (execute && (trade.status === "submitted" || trade.status === "unknown")) return sum + (tradeCashTotalUsd(trade) ?? 0);
     return sum;
   }, 0));
 }
@@ -506,30 +571,96 @@ async function maybeExecuteVistadexTrade(
   config: AppConfig,
   ledgerPath: string,
   ticket: VistadexTradeTicket,
-  execute: boolean
+  execute: boolean,
+  options: {
+    quote: VistadexTradeQuote;
+    refreshQuote?: () => Promise<VistadexTradeQuote>;
+    validateQuote?: (quote: VistadexTradeQuote) => void;
+    maxAttempts: number;
+    retryBackoffMs: number;
+  }
 ): Promise<{
   execution?: TradeExecution;
   ledger?: AppendLedgerResult;
+  attempts: WeatherReinvestExecutionAttempt[];
+  quote?: VistadexTradeQuote;
 }> {
-  if (!execute) return {};
+  if (!execute) return { attempts: [] };
   assertCanExecute(ticket, config.safety, execute);
   const preview = previewVistadexTrade(ticket);
-  const execution = await executeVistadexTrade(config, ticket);
-  const ledger = await appendExecutionLedgerRecord(ledgerPath, {
-    command: "weather:reinvest",
-    ticket,
-    preview,
-    execution,
-    action: "order"
-  });
-  return { execution, ledger };
+  const attempts: WeatherReinvestExecutionAttempt[] = [];
+  let lastError: unknown;
+  let activeQuote = options.quote;
+
+  for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
+    const startedAt = new Date().toISOString();
+    let rfqId = activeQuote.rfqId;
+    try {
+      if (attempt > 1 && options.refreshQuote) {
+        activeQuote = await options.refreshQuote();
+        rfqId = activeQuote.rfqId;
+      }
+      options.validateQuote?.(activeQuote);
+      const execution = await executeVistadexQuotedTrade(config, ticket, activeQuote);
+      const executionRfqId = (execution.details as Record<string, unknown>).rfqId;
+      rfqId = typeof executionRfqId === "string" ? executionRfqId : rfqId;
+      attempts.push({
+        attempt,
+        maxAttempts: options.maxAttempts,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        rfqId,
+        status: execution.status
+      });
+      const ledger = await appendExecutionLedgerRecord(ledgerPath, {
+        command: "weather:reinvest",
+        ticket,
+        preview,
+        execution,
+        action: "order"
+      });
+      return { execution, ledger, attempts, quote: activeQuote };
+    } catch (error) {
+      lastError = error;
+      const retryable = isRetryableVistadexExecutionError(error);
+      const shouldRetry = retryable && attempt < options.maxAttempts;
+      const nextDelayMs = shouldRetry ? vistadexExecutionRetryDelayMs(options.retryBackoffMs, attempt) : undefined;
+      attempts.push({
+        attempt,
+        maxAttempts: options.maxAttempts,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        rfqId,
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+        retryable,
+        nextDelayMs
+      });
+      if (!shouldRetry) break;
+      if (nextDelayMs && nextDelayMs > 0) await sleep(nextDelayMs);
+    }
+  }
+
+  const executionError = lastError instanceof Error ? lastError : new Error(String(lastError));
+  (executionError as Error & { attempts?: WeatherReinvestExecutionAttempt[] }).attempts = attempts;
+  throw executionError;
 }
 
 async function sellLockedWeatherPositions(
   config: AppConfig,
   ledgerPath: string,
   positions: VistadexPosition[],
-  options: Required<Pick<WeatherReinvestOptions, "execute" | "sellBidThreshold" | "sellMinPrice" | "minSellShares">>
+  options: Required<Pick<
+    WeatherReinvestOptions,
+    | "execute"
+    | "sellBidThreshold"
+    | "sellMinPrice"
+    | "minSellShares"
+    | "vistadexQuoteTimeoutMs"
+    | "vistadexFillerTimeoutMs"
+    | "vistadexMaxAttempts"
+    | "vistadexRetryBackoffMs"
+  >>
 ): Promise<{
   sold: WeatherReinvestTradeResult[];
   skipped: WeatherReinvestTradeResult[];
@@ -541,6 +672,7 @@ async function sellLockedWeatherPositions(
   const candidates = positions
     .filter((position) =>
       isWeatherPosition(position) &&
+      position.closed !== true &&
       position.conditionId &&
       (position.outcomeIndex === 0 || position.outcomeIndex === 1) &&
       positionBalance(position) >= options.minSellShares &&
@@ -555,7 +687,9 @@ async function sellLockedWeatherPositions(
       conditionId: position.conditionId as string,
       outcomeIndex: position.outcomeIndex as 0 | 1,
       shares,
-      limitPrice: options.sellMinPrice
+      limitPrice: options.sellMinPrice,
+      quoteTimeoutMs: options.vistadexQuoteTimeoutMs,
+      fillerTimeoutMs: options.vistadexFillerTimeoutMs
     };
     const base = {
       action: "sell_locked" as const,
@@ -569,12 +703,17 @@ async function sellLockedWeatherPositions(
       groupKey: groupKeyFromQuestion(position.question)
     };
 
+    let attempts: WeatherReinvestExecutionAttempt[] = [];
+    let rfqId: string | undefined;
     try {
-      const quote = quoteDetails(await quoteVistadexTrade(config, ticket));
+      const quoteResult = await createVistadexTradeQuote(config, ticket);
+      rfqId = quoteResult.rfqId;
+      const quote = quoteDetails(quoteResult);
       if (!quote || quote.pricePerShare < options.sellMinPrice) {
         skipped.push({
           ...base,
           status: "skipped",
+          rfqId: quoteResult.rfqId,
           quote,
           reason: quote
             ? `Sell quote ${quote.pricePerShare.toFixed(4)} below floor ${options.sellMinPrice.toFixed(4)}.`
@@ -583,7 +722,31 @@ async function sellLockedWeatherPositions(
         continue;
       }
 
-      const { execution, ledger } = await maybeExecuteVistadexTrade(config, ledgerPath, ticket, options.execute);
+      const validateSellQuote = (candidate: VistadexTradeQuote) => {
+        const candidateQuote = quoteDetails(candidate);
+        if (!candidateQuote) {
+          throw new Error("Retry sell RFQ did not return an executable quote.");
+        }
+        if (candidateQuote.pricePerShare < options.sellMinPrice) {
+          throw new Error(`Retry sell quote ${candidateQuote.pricePerShare.toFixed(4)} below floor ${options.sellMinPrice.toFixed(4)}.`);
+        }
+      };
+      const { execution, ledger, attempts: executionAttempts, quote: submittedQuote } = await maybeExecuteVistadexTrade(
+        config,
+        ledgerPath,
+        ticket,
+        options.execute,
+        {
+          quote: quoteResult,
+          refreshQuote: () => createVistadexTradeQuote(config, ticket),
+          validateQuote: validateSellQuote,
+          maxAttempts: options.vistadexMaxAttempts,
+          retryBackoffMs: options.vistadexRetryBackoffMs
+        }
+      );
+      attempts = executionAttempts;
+      const finalQuoteResult = submittedQuote ?? quoteResult;
+      const finalQuote = quoteDetails(finalQuoteResult) ?? quote;
       const fill = execution ? fillDetails(execution) : undefined;
       if (fill && fill.pricePerShare < options.sellMinPrice) {
         warnings.push(`Locked-position sell filled below floor for ${position.slug ?? position.conditionId}: ${fill.pricePerShare}.`);
@@ -591,15 +754,19 @@ async function sellLockedWeatherPositions(
       sold.push({
         ...base,
         status: execution?.status ?? "quoted",
-        quote,
+        rfqId: finalQuoteResult.rfqId,
+        quote: finalQuote,
         fill,
         transactionSignature: execution ? transactionSignature(execution) : undefined,
-        ledger
+        ledger,
+        attempts
       });
     } catch (error) {
       skipped.push({
         ...base,
         status: "failed",
+        rfqId,
+        attempts: (error as Error & { attempts?: WeatherReinvestExecutionAttempt[] }).attempts ?? attempts,
         error: error instanceof Error ? error.message : String(error)
       });
     }
@@ -676,6 +843,10 @@ async function buyPositiveWeatherEdges(
     | "highEntryEndLocalMinutes"
     | "lowEntryStartLocalMinutes"
     | "lowEntryEndLocalMinutes"
+    | "vistadexQuoteTimeoutMs"
+    | "vistadexFillerTimeoutMs"
+    | "vistadexMaxAttempts"
+    | "vistadexRetryBackoffMs"
   >> & Pick<WeatherReinvestOptions, "now">
 ): Promise<{
   bought: WeatherReinvestTradeResult[];
@@ -689,9 +860,10 @@ async function buyPositiveWeatherEdges(
   const heldConditionIds = new Set(positions.flatMap((position) => position.conditionId ? [position.conditionId] : []));
   const exposure = currentGroupExposure(positions);
   let availableCash = cashUsd;
+  let submittedBuyAttempts = 0;
 
   for (const row of edgeReport.signals) {
-    if (bought.length >= options.maxBuys) break;
+    if (bought.length >= options.maxBuys || submittedBuyAttempts >= options.maxBuys) break;
     if (availableCash < options.minTradeUsd) break;
     const side = "buy" as const;
     const outcomeIndex = row.bestSide === "YES" ? 0 : 1;
@@ -806,13 +978,19 @@ async function buyPositiveWeatherEdges(
       conditionId: marketRef.conditionId,
       outcomeIndex,
       amountUsd: roundUsd(amountUsd),
-      limitPrice: Math.max(0.001, maxAcceptablePrice)
+      limitPrice: Math.max(0.001, maxAcceptablePrice),
+      quoteTimeoutMs: options.vistadexQuoteTimeoutMs,
+      fillerTimeoutMs: options.vistadexFillerTimeoutMs
     };
 
+    let attempts: WeatherReinvestExecutionAttempt[] = [];
+    let rfqId: string | undefined;
     try {
-      const quote = quoteDetails(await quoteVistadexTrade(config, ticket));
+      const quoteResult = await createVistadexTradeQuote(config, ticket);
+      rfqId = quoteResult.rfqId;
+      const quote = quoteDetails(quoteResult);
       if (!quote) {
-        skipped.push({ ...base, conditionId: marketRef.conditionId, status: "skipped", amountUsd: ticket.amountUsd, reason: "No executable buy quote." });
+        skipped.push({ ...base, conditionId: marketRef.conditionId, status: "skipped", amountUsd: ticket.amountUsd, rfqId, reason: "No executable buy quote." });
         continue;
       }
       if (quote.pricePerShare > maxAcceptablePrice) {
@@ -821,6 +999,7 @@ async function buyPositiveWeatherEdges(
           conditionId: marketRef.conditionId,
           status: "skipped",
           amountUsd: ticket.amountUsd,
+          rfqId,
           quote,
           reason: `Buy quote ${quote.pricePerShare.toFixed(4)} above max acceptable ${maxAcceptablePrice.toFixed(4)}.`
         });
@@ -828,12 +1007,37 @@ async function buyPositiveWeatherEdges(
       }
 
       ticket.limitPrice = Math.min(maxAcceptablePrice, quote.pricePerShare + options.buyQuoteDriftUsd);
-      const { execution, ledger } = await maybeExecuteVistadexTrade(config, ledgerPath, ticket, options.execute);
+      submittedBuyAttempts += 1;
+      const validateBuyQuote = (candidate: VistadexTradeQuote) => {
+        const candidateQuote = quoteDetails(candidate);
+        if (!candidateQuote) {
+          throw new Error("Retry buy RFQ did not return an executable quote.");
+        }
+        if (candidateQuote.pricePerShare > maxAcceptablePrice) {
+          throw new Error(`Retry buy quote ${candidateQuote.pricePerShare.toFixed(4)} above max acceptable ${maxAcceptablePrice.toFixed(4)}.`);
+        }
+      };
+      const { execution, ledger, attempts: executionAttempts, quote: submittedQuote } = await maybeExecuteVistadexTrade(
+        config,
+        ledgerPath,
+        ticket,
+        options.execute,
+        {
+          quote: quoteResult,
+          refreshQuote: () => createVistadexTradeQuote(config, ticket),
+          validateQuote: validateBuyQuote,
+          maxAttempts: options.vistadexMaxAttempts,
+          retryBackoffMs: options.vistadexRetryBackoffMs
+        }
+      );
+      attempts = executionAttempts;
+      const finalQuoteResult = submittedQuote ?? quoteResult;
+      const finalQuote = quoteDetails(finalQuoteResult) ?? quote;
       const fill = execution ? fillDetails(execution) : undefined;
       if (fill && fill.pricePerShare > maxAcceptablePrice) {
         warnings.push(`Buy filled above max acceptable for ${row.marketSlug}: ${fill.pricePerShare} > ${maxAcceptablePrice}.`);
       }
-      const spentUsd = fill?.totalUsd ?? quote.totalUsd;
+      const spentUsd = fill?.totalUsd ?? finalQuote.totalUsd;
       availableCash -= spentUsd;
       exposure.set(groupKey, (exposure.get(groupKey) ?? 0) + spentUsd);
       heldConditionIds.add(marketRef.conditionId);
@@ -842,10 +1046,12 @@ async function buyPositiveWeatherEdges(
         status: execution?.status ?? "quoted",
         conditionId: marketRef.conditionId,
         amountUsd: ticket.amountUsd,
-        quote,
+        rfqId: finalQuoteResult.rfqId,
+        quote: finalQuote,
         fill,
         transactionSignature: execution ? transactionSignature(execution) : undefined,
-        ledger
+        ledger,
+        attempts
       });
     } catch (error) {
       skipped.push({
@@ -853,6 +1059,8 @@ async function buyPositiveWeatherEdges(
         conditionId: marketRef.conditionId,
         status: "failed",
         amountUsd: ticket.amountUsd,
+        rfqId,
+        attempts: (error as Error & { attempts?: WeatherReinvestExecutionAttempt[] }).attempts ?? attempts,
         error: error instanceof Error ? error.message : String(error)
       });
     }
@@ -869,11 +1077,21 @@ export async function runWeatherReinvestment(
   assertReinvestCalibrationEnabled(options.skipCalibration);
   const ledgerPath = options.ledgerPath ?? config.ledger.path;
   const execute = options.execute === true;
+  const vistadexExecution = {
+    quoteTimeoutMs: positiveInteger(options.vistadexQuoteTimeoutMs, DEFAULT_VISTADEX_QUOTE_TIMEOUT_MS, "Vistadex quote timeout"),
+    fillerTimeoutMs: positiveInteger(options.vistadexFillerTimeoutMs, DEFAULT_VISTADEX_FILLER_TIMEOUT_MS, "Vistadex filler timeout"),
+    maxAttempts: positiveInteger(options.vistadexMaxAttempts, DEFAULT_VISTADEX_EXECUTION_ATTEMPTS, "Vistadex max attempts"),
+    retryBackoffMs: nonNegativeFinite(options.vistadexRetryBackoffMs, DEFAULT_VISTADEX_RETRY_BACKOFF_MS, "Vistadex retry backoff")
+  };
   const sellOptions = {
     execute,
     sellBidThreshold: options.sellBidThreshold ?? 0.99,
     sellMinPrice: options.sellMinPrice ?? 0.98,
-    minSellShares: options.minSellShares ?? 0.5
+    minSellShares: options.minSellShares ?? 0.5,
+    vistadexQuoteTimeoutMs: vistadexExecution.quoteTimeoutMs,
+    vistadexFillerTimeoutMs: vistadexExecution.fillerTimeoutMs,
+    vistadexMaxAttempts: vistadexExecution.maxAttempts,
+    vistadexRetryBackoffMs: vistadexExecution.retryBackoffMs
   };
   const highEntryStartLocalMinutes = options.highEntryStartLocalMinutes ?? DEFAULT_HIGH_ENTRY_START_MINUTES;
   const highEntryEndLocalMinutes = options.highEntryEndLocalMinutes ?? DEFAULT_HIGH_ENTRY_END_MINUTES;
@@ -894,6 +1112,10 @@ export async function runWeatherReinvestment(
     highEntryEndLocalMinutes,
     lowEntryStartLocalMinutes,
     lowEntryEndLocalMinutes,
+    vistadexQuoteTimeoutMs: vistadexExecution.quoteTimeoutMs,
+    vistadexFillerTimeoutMs: vistadexExecution.fillerTimeoutMs,
+    vistadexMaxAttempts: vistadexExecution.maxAttempts,
+    vistadexRetryBackoffMs: vistadexExecution.retryBackoffMs,
     now: options.now
   };
 
@@ -916,7 +1138,7 @@ export async function runWeatherReinvestment(
     ? observedAfterSellState
     : withCashUsd(observedAfterSellState, effectivePostSellCashUsd);
   const bankrollUsd = options.bankrollUsd ?? afterSellState.summary.computedBankrollUsd;
-  const minCashToReinvestUsd = Math.max(0, options.minCashToReinvestUsd ?? 5);
+  const minCashToReinvestUsd = Math.max(0, options.minCashToReinvestUsd ?? 1);
   const targetCashReserveUsd = Math.max(0, options.targetCashReserveUsd ?? 0);
   const deployableCashUsd = deployableWeatherCash(afterSellState.cashUsd, targetCashReserveUsd);
   const buyCashBudgetUsd = weatherBuyCashBudget({
@@ -1034,6 +1256,7 @@ export async function runWeatherReinvestment(
     deployableCashUsd: roundUsd(deployableWeatherCash(finalState.cashUsd, targetCashReserveUsd)),
     buyCashBudgetUsd: roundUsd(buyCashBudgetUsd),
     targetDate: edgeReport?.targetDate ?? targetDate,
+    vistadexExecution,
     weatherEdge: edgeReport
       ? {
         scannedGroups: edgeReport.scannedGroups,

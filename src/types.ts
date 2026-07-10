@@ -35,6 +35,8 @@ export interface VistadexTradeTicket {
   amountUsd?: number;
   shares?: number;
   limitPrice?: number;
+  quoteTimeoutMs?: number;
+  fillerTimeoutMs?: number;
 }
 
 export type TradeTicket = PolymarketOrderTicket | VistadexTradeTicket;

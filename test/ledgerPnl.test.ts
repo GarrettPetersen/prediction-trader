@@ -7,6 +7,7 @@ import {
 import {
   computeLedgerPnl,
   ledgerPnlKey,
+  markFromVistadexPosition,
   type LedgerPositionMark
 } from "../src/ledgerPnl.js";
 
@@ -107,6 +108,32 @@ function mark(input: {
 }
 
 describe("ledger PnL", () => {
+  it("does not mark closed Vistadex positions as tradable live value", () => {
+    const mark = markFromVistadexPosition({
+      slug: "will-ronaldo-cry-at-the-world-cup",
+      question: "Will Ronaldo Cry at the World Cup?",
+      outcomes: ["Yes", "No"],
+      conditionId: "ronaldo",
+      outcomeIndex: 1,
+      balance: "4524.409279",
+      price: {
+        midpoint: 1,
+        bestBid: 0,
+        bestAsk: 1
+      },
+      status: "active",
+      closed: true
+    });
+
+    assert.ok(mark);
+    assert.equal(mark.status, "closed");
+    assert.equal(mark.shares, 0);
+    assert.equal(mark.midPrice, undefined);
+    assert.equal(mark.bidPrice, undefined);
+    assert.equal(mark.midValueUsd, 0);
+    assert.equal(mark.bidValueUsd, 0);
+  });
+
   it("counts sold winners and open live marks in one report", () => {
     const records = [
       fill({
