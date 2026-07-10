@@ -120,6 +120,7 @@ import {
 } from "./weatherResolutionAudit.js";
 import {
   runWeatherReinvestment,
+  weatherReinvestExecutionFailures,
   writeWeatherReinvestReport,
   type WeatherReinvestConfidence
 } from "./weatherReinvest.js";
@@ -1951,6 +1952,11 @@ async function run(): Promise<void> {
     const reportPath = stringArg(args, "report-path", false);
     if (reportPath) await writeWeatherReinvestReport(reportPath, report);
     print(report);
+    const executionFailures = weatherReinvestExecutionFailures(report);
+    if (execute && executionFailures.length > 0) {
+      process.exitCode = 1;
+      console.error(`WeatherEdge live execution failed for ${executionFailures.length} trade(s); report written${reportPath ? ` to ${reportPath}` : ""}.`);
+    }
     return;
   }
 

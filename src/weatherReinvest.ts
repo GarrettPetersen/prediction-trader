@@ -203,6 +203,13 @@ export interface WeatherReinvestStateSummary {
   computedBankrollUsd: number;
 }
 
+export function weatherReinvestExecutionFailures(report: WeatherReinvestReport): WeatherReinvestTradeResult[] {
+  return [...report.sold, ...report.bought, ...report.skipped].filter((trade) =>
+    trade.status === "failed" &&
+    (trade.attempts ?? []).some((attempt) => attempt.status === "failed")
+  );
+}
+
 export interface WeatherReinvestAuditGate {
   enabled: boolean;
   passed: boolean;
