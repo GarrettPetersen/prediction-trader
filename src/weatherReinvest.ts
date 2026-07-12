@@ -47,6 +47,10 @@ import {
   fetchOpenMeteoForecastFreshness,
   type WeatherForecastFreshnessAssessment
 } from "./weatherForecastFreshness.js";
+import type {
+  WeatherMarketAnchorPricingOptions,
+  WeatherTradingStrategy
+} from "./weatherPricing.js";
 
 export type WeatherReinvestConfidence = "LOW" | "MEDIUM" | "HIGH";
 
@@ -71,6 +75,9 @@ export interface WeatherReinvestOptions extends Pick<
   ledgerPath?: string;
   bankrollUsd?: number;
   maxPerTradeUsd?: number;
+  strategy?: WeatherTradingStrategy;
+  marketAnchorCoefficient?: number;
+  marketAnchorMinOppositeMarketProbability?: number;
   kellyMultiplier?: number;
   maxKellyFraction?: number;
   maxGroupFraction?: number;
@@ -146,6 +153,13 @@ export interface WeatherReinvestTradeResult {
   calibrationMeanAbsoluteErrorC?: number;
   consensusMeanC?: number;
   consensusSigmaC?: number;
+  strategy?: WeatherEdgeRow["strategy"];
+  originalBestSide?: WeatherEdgeRow["originalBestSide"];
+  originalEdge?: number;
+  originalFair?: number;
+  originalReferencePrice?: number;
+  oppositeMarketProbability?: number;
+  marketAnchorCoefficient?: number;
   entryWindow?: WeatherEntryWindowAssessment;
 }
 
@@ -164,6 +178,7 @@ export interface WeatherReinvestExecutionAttempt {
 export interface WeatherReinvestReport {
   execute: boolean;
   pauseBuys: boolean;
+  strategy: WeatherTradingStrategy;
   startedAt: string;
   finishedAt: string;
   ledgerPath: string;
@@ -322,6 +337,52 @@ export function requireReinvestMinEdge(minEdge?: number): number {
     throw new Error("weather:reinvest requires --min-edge; do not rely on implicit live-trading edge thresholds.");
   }
   return minEdge;
+}
+
+export function requireReinvestPricingStrategy(options: Pick<
+  WeatherReinvestOptions,
+  "strategy" | "marketAnchorCoefficient" | "marketAnchorMinOppositeMarketProbability" | "buyMinExecutableEdge"
+>): {
+  strategy: WeatherTradingStrategy;
+  marketAnchor?: WeatherMarketAnchorPricingOptions;
+} {
+  if (options.strategy === undefined) {
+    throw new Error("weather:reinvest requires --strategy; do not rely on an implicit live-trading model.");
+  }
+  if (options.strategy === "forecast_edge") {
+    if (
+      options.marketAnchorCoefficient !== undefined ||
+      options.marketAnchorMinOppositeMarketProbability !== undefined
+    ) {
+      throw new Error("Market-anchor parameters are only valid with --strategy market-informed-inverse.");
+    }
+    return { strategy: options.strategy };
+  }
+  if (options.strategy !== "market_informed_inverse") {
+    throw new Error(`Unsupported WeatherEdge strategy: ${String(options.strategy)}.`);
+  }
+  const coefficient = options.marketAnchorCoefficient;
+  const minOppositeMarketProbability = options.marketAnchorMinOppositeMarketProbability;
+  if (coefficient === undefined || !Number.isFinite(coefficient) || coefficient >= 0) {
+    throw new Error("market-informed-inverse requires --market-anchor-coefficient with a finite negative value.");
+  }
+  if (
+    minOppositeMarketProbability === undefined ||
+    !Number.isFinite(minOppositeMarketProbability) ||
+    minOppositeMarketProbability < 0 ||
+    minOppositeMarketProbability > 1
+  ) {
+    throw new Error("market-informed-inverse requires --market-anchor-min-opposite-probability between 0 and 1.");
+  }
+  const minExecutableEdge = options.buyMinExecutableEdge ?? 0.03;
+  return {
+    strategy: options.strategy,
+    marketAnchor: {
+      coefficient,
+      minOppositeMarketProbability,
+      minExecutableEdge
+    }
+  };
 }
 
 export function assertReinvestCalibrationEnabled(skipCalibration?: boolean): void {
@@ -839,7 +900,6 @@ async function buyPositiveWeatherEdges(
   options: Required<Pick<
     WeatherReinvestOptions,
     | "execute"
-    | "maxPerTradeUsd"
     | "maxGroupFraction"
     | "minTradeUsd"
     | "maxBuys"
@@ -854,7 +914,7 @@ async function buyPositiveWeatherEdges(
     | "vistadexFillerTimeoutMs"
     | "vistadexMaxAttempts"
     | "vistadexRetryBackoffMs"
-  >> & Pick<WeatherReinvestOptions, "now">
+  >> & Pick<WeatherReinvestOptions, "maxPerTradeUsd" | "now">
 ): Promise<{
   bought: WeatherReinvestTradeResult[];
   skipped: WeatherReinvestTradeResult[];
@@ -900,6 +960,13 @@ async function buyPositiveWeatherEdges(
       calibrationMeanAbsoluteErrorC: row.calibrationMeanAbsoluteErrorC,
       consensusMeanC: row.consensusMeanC,
       consensusSigmaC: row.consensusSigmaC,
+      strategy: row.strategy,
+      originalBestSide: row.originalBestSide,
+      originalEdge: row.originalEdge,
+      originalFair: row.originalFair,
+      originalReferencePrice: row.originalReferencePrice,
+      oppositeMarketProbability: row.oppositeMarketProbability,
+      marketAnchorCoefficient: row.marketAnchorCoefficient,
       entryWindow
     };
 
@@ -963,12 +1030,13 @@ async function buyPositiveWeatherEdges(
       continue;
     }
 
-    const amountUsd = Math.min(
+    const amountLimits = [
       row.suggestedSizeUsd ?? 0,
-      options.maxPerTradeUsd,
       availableCash,
       groupCapacityUsd
-    );
+    ];
+    if (options.maxPerTradeUsd !== undefined) amountLimits.push(options.maxPerTradeUsd);
+    const amountUsd = Math.min(...amountLimits);
     if (amountUsd < options.minTradeUsd) {
       skipped.push({ ...base, conditionId: marketRef.conditionId, status: "skipped", reason: "Trade size clipped below minimum." });
       continue;
@@ -1082,6 +1150,13 @@ export async function runWeatherReinvestment(
 ): Promise<WeatherReinvestReport> {
   const startedAt = new Date().toISOString();
   assertReinvestCalibrationEnabled(options.skipCalibration);
+  const pricingStrategy = requireReinvestPricingStrategy(options);
+  if (
+    options.maxPerTradeUsd !== undefined &&
+    (!Number.isFinite(options.maxPerTradeUsd) || options.maxPerTradeUsd <= 0)
+  ) {
+    throw new Error("WeatherEdge max per trade must be a positive number when configured.");
+  }
   const ledgerPath = options.ledgerPath ?? config.ledger.path;
   const execute = options.execute === true;
   const vistadexExecution = {
@@ -1108,7 +1183,7 @@ export async function runWeatherReinvestment(
   assertWeatherEntryWindowMinutes("temperature_low", lowEntryStartLocalMinutes, lowEntryEndLocalMinutes);
   const buyOptions = {
     execute,
-    maxPerTradeUsd: options.maxPerTradeUsd ?? 10,
+    maxPerTradeUsd: options.maxPerTradeUsd,
     maxGroupFraction: options.maxGroupFraction ?? 0.25,
     minTradeUsd: options.minTradeUsd ?? 0.5,
     maxBuys: Math.max(0, Math.trunc(options.maxBuys ?? 8)),
@@ -1200,7 +1275,9 @@ export async function runWeatherReinvestment(
       skipCalibration: options.skipCalibration,
       calibrationHalfLifeDays: options.calibrationHalfLifeDays,
       cityBiasPriorWeight: options.cityBiasPriorWeight,
-      sizingStrategy: "city_portfolio"
+      sizingStrategy: "city_portfolio",
+      strategy: pricingStrategy.strategy,
+      marketAnchor: pricingStrategy.marketAnchor
     });
   const buyResult = edgeReport
     ? await buyPositiveWeatherEdges(
@@ -1251,6 +1328,7 @@ export async function runWeatherReinvestment(
   return {
     execute,
     pauseBuys,
+    strategy: pricingStrategy.strategy,
     startedAt,
     finishedAt: new Date().toISOString(),
     ledgerPath,

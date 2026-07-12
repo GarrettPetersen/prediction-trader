@@ -60,6 +60,13 @@ export interface WeatherEdgeRow {
   suggestedSizeUsd?: number;
   tokenId?: string;
   price?: number;
+  strategy: WeatherOutcomePricing["strategy"];
+  originalBestSide?: WeatherOutcomePricing["originalBestSide"];
+  originalEdge?: number;
+  originalFair?: number;
+  originalReferencePrice?: number;
+  oppositeMarketProbability?: number;
+  marketAnchorCoefficient?: number;
   liquidity?: number;
   volume?: number;
   resolutionSource?: string;
@@ -160,6 +167,13 @@ export function buildWeatherEdgeRows(reports: WeatherPricingReport[]): WeatherEd
           suggestedSizeUsd: unsafeStartedDay ? undefined : outcome.suggestedSizeUsd,
           tokenId: outcome.tokenId,
           price: unsafeStartedDay ? undefined : outcome.price,
+          strategy: outcome.strategy,
+          originalBestSide: outcome.originalBestSide,
+          originalEdge: outcome.originalEdge,
+          originalFair: outcome.originalFair,
+          originalReferencePrice: outcome.originalReferencePrice,
+          oppositeMarketProbability: outcome.oppositeMarketProbability,
+          marketAnchorCoefficient: outcome.marketAnchorCoefficient,
           liquidity: market?.liquidity,
           volume: market?.volume,
           resolutionSource: report.resolutionTarget?.resolutionSource,
@@ -221,6 +235,8 @@ function pricingOptions(options: WeatherEdgeReportOptions): WeatherPricingOption
     countryCode: options.countryCode,
     allowCityForecast: options.allowCityForecast,
     sizingStrategy: options.sizingStrategy,
+    strategy: options.strategy,
+    marketAnchor: options.marketAnchor,
     maxGroupFraction: options.maxGroupFraction,
     portfolioStepUsd: options.portfolioStepUsd
   };

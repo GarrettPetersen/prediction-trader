@@ -508,13 +508,15 @@ Run the Vistadex WeatherEdge reinvestment loop locally:
 ```bash
 npm run weather:reinvest -- \
   --days-ahead 1 \
-  --max-per-trade 10 \
+  --strategy market-informed-inverse \
+  --market-anchor-coefficient -0.25 \
+  --market-anchor-min-opposite-probability 0.50 \
   --max-buys 8 \
   --max-group-fraction 0.25 \
-  --max-buy-spend-fraction 0.05 \
+  --max-buy-spend-fraction 0.25 \
   --kelly-multiplier 0.25 \
   --max-kelly-fraction 0.25 \
-  --min-edge 0.20 \
+  --min-edge 0.30 \
   --min-cash-to-reinvest 5 \
   --target-cash-reserve 20 \
   --min-confidence medium \
@@ -605,21 +607,24 @@ substitute.
 Configure repository variables:
 
 ```text
-WEATHEREDGE_LIVE=0
+WEATHEREDGE_LIVE=1
 WEATHEREDGE_BANKROLL=
-WEATHEREDGE_MAX_PER_TRADE=1
+WEATHEREDGE_STRATEGY=market-informed-inverse
+WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT=-0.25
+WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY=0.50
+WEATHEREDGE_MAX_PER_TRADE=
 WEATHEREDGE_MAX_BUYS=8
 WEATHEREDGE_MAX_GROUP_FRACTION=0.25
-WEATHEREDGE_MAX_BUY_SPEND_FRACTION=0.05
+WEATHEREDGE_MAX_BUY_SPEND_FRACTION=0.25
 WEATHEREDGE_MAX_BUY_SPEND_USD=
 WEATHEREDGE_KELLY_MULTIPLIER=0.25
 WEATHEREDGE_MAX_KELLY_FRACTION=0.25
-WEATHEREDGE_MIN_EDGE=0.20
+WEATHEREDGE_MIN_EDGE=0.30
 WEATHEREDGE_MIN_CONFIDENCE=medium
 WEATHEREDGE_MIN_CASH_TO_REINVEST=5
 WEATHEREDGE_TARGET_CASH_RESERVE=20
-WEATHEREDGE_PAUSE_BUYS=true
-WEATHEREDGE_REQUIRE_RECENT_AUDIT_POSITIVE=true
+WEATHEREDGE_PAUSE_BUYS=false
+WEATHEREDGE_REQUIRE_RECENT_AUDIT_POSITIVE=false
 WEATHEREDGE_AUDIT_LOOKBACK_HOURS=72
 WEATHEREDGE_AUDIT_MIN_POSITIONS=5
 WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME=20:00
@@ -629,24 +634,36 @@ WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME=14:30
 WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS=12
 WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS=
 WEATHEREDGE_CITY_BIAS_PRIOR_WEIGHT=
-PREDICTION_TRADER_MAX_USD=10
+PREDICTION_TRADER_MAX_USD=1000
 NWS_USER_AGENT=prediction-trader/0.1 weatheredge github-actions
 ```
 
-`WEATHEREDGE_MIN_EDGE` is intentionally required rather than defaulted. A
-missing live-trading edge threshold should fail the scheduled run instead of
-quietly widening the strategy.
+`WEATHEREDGE_STRATEGY`, `WEATHEREDGE_MIN_EDGE`,
+`WEATHEREDGE_MAX_BUY_SPEND_FRACTION`, and `PREDICTION_TRADER_MAX_USD` are
+intentionally required rather than defaulted. Missing live strategy or risk
+configuration fails the scheduled run instead of quietly changing behavior.
+For `market-informed-inverse`, the coefficient and minimum opposite-market
+probability are required too. The current selected rule takes the opposite side
+only when the forecast appears to have at least `0.30` edge and the market
+already assigns that opposite side at least `0.50`; coefficient `-0.25` treats
+the disagreement as a weak smart-money signal rather than fully inverting it.
+
+An empty `WEATHEREDGE_MAX_PER_TRADE` removes the strategy-level per-order cap.
+It does not make risk unlimited: fractional Kelly, the 25% account-wide buy
+budget, the 25% city/station/day cap, available cash, and the `$20` reserve
+still bind. `PREDICTION_TRADER_MAX_USD=1000` is a deliberately nonbinding
+execution safety ceiling for this small account.
 
 The scheduled reinvestment loop has no `WEATHEREDGE_SKIP_CALIBRATION` escape
 hatch. If calibration datasets are missing, unreadable, or unable to produce
 historical-residual pricing, the run fails or skips buys instead of falling back
 to heuristic pricing.
 
-Fresh buys are paused by default with `WEATHEREDGE_PAUSE_BUYS=true`. While this
-is set, the schedule may still quote and sell weather positions that are
-effectively locked, but it will not open new weather positions. Set it to
-`false` only after the latest backtest and ledger audit both support turning the
-strategy back on.
+`WEATHEREDGE_PAUSE_BUYS=true` leaves locked-position sales active but opens no
+new weather positions. The recent-audit gate is disabled for the initial
+market-informed-inverse launch because its lookback contains trades from the
+superseded forecast-edge strategy; re-enable it only after the audit is made
+strategy-aware or that history has aged out.
 
 The workflow sets `TZ=America/Vancouver`, so `--days-ahead 1` means tomorrow
 from British Columbia rather than UTC. Candidate buys are still gated by the
@@ -938,24 +955,35 @@ model assumption.
 
 The market backtest also reports an `oppositeSummary`. That is the same set of
 forecast-edge candidates and the same dollar sizing, but with the opposite side
-bought at its own adverse-slippage entry price. This is the "market-informed
-inverse" check: if our apparent model edge is really hidden market information
-against us, the opposite portfolio should outperform. Treat this as an audit
-comparison, not a second live strategy switch. After fixing symmetric slippage,
-the July 4-7 cron-entry backtest favored the normal forecast-edge strategy:
+bought at its own adverse-slippage entry price. For a less simplistic test, use
+the inverse-model grid:
 
-```text
-Date        Forecast-edge PnL   Inverse PnL
-2026-07-04           -3.69          +7.19
-2026-07-05          +28.76         -49.32
-2026-07-06          +25.09         -14.09
-2026-07-07          -17.54         +10.54
-Total               +32.62         -45.68
+```bash
+npm run weather:backtest:inverse-grid -- \
+  --start-date 2026-06-24 \
+  --end-date 2026-07-11 \
+  --holdout-start-date 2026-07-08 \
+  --bankroll 140 \
+  --max-per-trade 10 \
+  --max-portfolio-fraction 0.25 \
+  --max-group-fraction 0.25 \
+  --min-training-trades 20
 ```
 
-That is still a small sample, but it argues against blindly inverting the model
-right now. Keep live buys paused until the ledger audit and a larger
-out-of-sample backtest agree that the strategy should be re-enabled.
+The command uses stable stored market snapshots, fails if historical entry
+prices cannot be obtained, and tests market-anchor coefficients from `-0.25` to
+`-2` together with original-edge and opposite-market-confidence gates. It
+selects a model using training PnL only, then reports the untouched holdout
+result separately. With the command above, the training-selected model was a
+weak `-0.25` inversion: require at least 30 points of apparent forecast edge and
+only trade when the market already gives the opposite side at least 50%.
+It returned `+$11.76` on 59 training trades and `+$11.58` on 12 holdout trades.
+The normal forecast-edge baseline lost `-$41.04` in training and `-$25.77` in
+holdout under the same larger research risk budget. On July 11, 2026 we selected
+the training winner for live trading manually. The four-day holdout is
+encouraging but small, so live trade metadata records the original forecast
+side, original edge, market probability, coefficient, and adjusted edge for
+later auditing.
 
 The market backtest calibrates the forecast before pricing bins:
 

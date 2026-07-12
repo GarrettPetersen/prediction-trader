@@ -48,6 +48,7 @@ import {
   type WeatherForecastCalibration,
   type WeatherSourceForecastValue
 } from "./weatherCalibration.js";
+import { priceWeatherMarketAnchor } from "./weatherMarketAnchor.js";
 
 export interface WeatherForecastPoint {
   source: WeatherSourceId;
@@ -103,6 +104,13 @@ export interface WeatherOutcomePricing {
   suggestedSizeUsd?: number;
   tokenId?: string;
   price?: number;
+  strategy: WeatherTradingStrategy;
+  originalBestSide?: "YES" | "NO";
+  originalEdge?: number;
+  originalFair?: number;
+  originalReferencePrice?: number;
+  oppositeMarketProbability?: number;
+  marketAnchorCoefficient?: number;
   reason: string;
 }
 
@@ -139,9 +147,18 @@ export interface WeatherPricingOptions {
   calibrationHalfLifeDays?: number;
   cityBiasPriorWeight?: number;
   sizingStrategy?: WeatherSizingStrategy;
+  strategy?: WeatherTradingStrategy;
+  marketAnchor?: WeatherMarketAnchorPricingOptions;
 }
 
 export type WeatherSizingStrategy = "independent_kelly" | "city_portfolio";
+export type WeatherTradingStrategy = "forecast_edge" | "market_informed_inverse";
+
+export interface WeatherMarketAnchorPricingOptions {
+  coefficient: number;
+  minOppositeMarketProbability: number;
+  minExecutableEdge: number;
+}
 
 export interface WeatherPricingResolutionTarget {
   matched: boolean;
@@ -531,6 +548,26 @@ function marketToken(candidate: WeatherMarketCandidate, outcome: "Yes" | "No"): 
   return candidate.outcomes.find((item) => item.outcome.toLowerCase() === outcome.toLowerCase())?.tokenId;
 }
 
+function validateMarketAnchorOptions(options: WeatherMarketAnchorPricingOptions): void {
+  if (!Number.isFinite(options.coefficient) || options.coefficient >= 0) {
+    throw new Error("Market-informed inverse pricing requires a finite negative coefficient.");
+  }
+  if (
+    !Number.isFinite(options.minOppositeMarketProbability) ||
+    options.minOppositeMarketProbability < 0 ||
+    options.minOppositeMarketProbability > 1
+  ) {
+    throw new Error("Market-informed inverse pricing requires minOppositeMarketProbability between 0 and 1.");
+  }
+  if (
+    !Number.isFinite(options.minExecutableEdge) ||
+    options.minExecutableEdge < 0 ||
+    options.minExecutableEdge > 1
+  ) {
+    throw new Error("Market-informed inverse pricing requires minExecutableEdge between 0 and 1.");
+  }
+}
+
 function compactLocation(location: WeatherLocation): WeatherPricingResolutionTarget["forecastLocation"] {
   return {
     name: location.name,
@@ -603,25 +640,132 @@ function priceCandidate(
   consensus: WeatherConsensus,
   options: WeatherPricingOptions
 ): WeatherOutcomePricing {
-  const fairYes = probabilityInRange(
+  const forecastFairYes = probabilityInRange(
     consensus.meanC,
     consensus.sigmaC,
     candidate.parsed.outcome.lowerTempC,
     candidate.parsed.outcome.upperTempC
   );
-  const fairNo = 1 - fairYes;
+  const forecastFairNo = 1 - forecastFairYes;
   const yesAsk = candidate.bestAsk ?? marketPrice(candidate, "Yes");
   const yesBid = candidate.bestBid ?? marketPrice(candidate, "Yes");
   const noAsk = marketPrice(candidate, "No") ?? (yesBid === undefined ? undefined : 1 - yesBid);
   const noBid = marketPrice(candidate, "No") ?? (yesAsk === undefined ? undefined : 1 - yesAsk);
+  const yesReferencePrice = marketPrice(candidate, "Yes");
+  const noReferencePrice = marketPrice(candidate, "No")
+    ?? (yesReferencePrice === undefined ? undefined : 1 - yesReferencePrice);
   const threshold = dynamicEdgeThreshold(consensus.sigmaC, options.minEdge);
-  const yesEdge = yesAsk === undefined ? undefined : fairYes - yesAsk;
-  const noEdge = noAsk === undefined ? undefined : fairNo - noAsk;
-  const bestSignal = (yesEdge ?? -Infinity) >= (noEdge ?? -Infinity)
-    ? { signal: "BUY_YES" as const, edge: yesEdge, price: yesAsk, probability: fairYes, tokenId: marketToken(candidate, "Yes") }
-    : { signal: "BUY_NO" as const, edge: noEdge, price: noAsk, probability: fairNo, tokenId: marketToken(candidate, "No") };
+  const forecastYesEdge = yesAsk === undefined ? undefined : forecastFairYes - yesAsk;
+  const forecastNoEdge = noAsk === undefined ? undefined : forecastFairNo - noAsk;
+  const originalBest = (forecastYesEdge ?? -Infinity) >= (forecastNoEdge ?? -Infinity)
+    ? {
+      side: "YES" as const,
+      signal: "BUY_YES" as const,
+      edge: forecastYesEdge,
+      price: yesAsk,
+      probability: forecastFairYes,
+      referencePrice: yesReferencePrice,
+      oppositeReferencePrice: noReferencePrice,
+      tokenId: marketToken(candidate, "Yes")
+    }
+    : {
+      side: "NO" as const,
+      signal: "BUY_NO" as const,
+      edge: forecastNoEdge,
+      price: noAsk,
+      probability: forecastFairNo,
+      referencePrice: noReferencePrice,
+      oppositeReferencePrice: yesReferencePrice,
+      tokenId: marketToken(candidate, "No")
+    };
 
-  const signal = bestSignal.edge !== undefined && bestSignal.edge >= threshold
+  const strategy = options.strategy ?? "forecast_edge";
+  let fairYes = forecastFairYes;
+  let fairNo = forecastFairNo;
+  let yesEdge = forecastYesEdge;
+  let noEdge = forecastNoEdge;
+  let bestSignal = originalBest;
+  let strategyGateReason: string | undefined;
+  let oppositeMarketProbability: number | undefined;
+  let marketAnchorCoefficient: number | undefined;
+
+  if (strategy === "market_informed_inverse") {
+    if (!options.marketAnchor) {
+      throw new Error("market_informed_inverse pricing requires explicit marketAnchor options.");
+    }
+    validateMarketAnchorOptions(options.marketAnchor);
+    marketAnchorCoefficient = options.marketAnchor.coefficient;
+    oppositeMarketProbability = originalBest.oppositeReferencePrice;
+
+    if (originalBest.edge === undefined || originalBest.edge < threshold) {
+      strategyGateReason = `Original forecast edge ${(originalBest.edge ?? 0).toFixed(3)} is below required ${threshold.toFixed(3)}.`;
+    } else if (originalBest.referencePrice === undefined || originalBest.oppositeReferencePrice === undefined) {
+      strategyGateReason = "Market-informed inverse pricing requires explicit YES and NO reference prices.";
+    } else if (originalBest.oppositeReferencePrice < options.marketAnchor.minOppositeMarketProbability) {
+      strategyGateReason = `Opposite market probability ${originalBest.oppositeReferencePrice.toFixed(3)} is below required ${options.marketAnchor.minOppositeMarketProbability.toFixed(3)}.`;
+    } else {
+      if (originalBest.price === undefined) {
+        strategyGateReason = "Market-informed inverse pricing requires an executable original-side price.";
+      } else {
+        const oppositeAsk = originalBest.side === "YES" ? noAsk : yesAsk;
+        if (oppositeAsk === undefined) {
+          strategyGateReason = "Market-informed inverse pricing requires an executable opposite-side price.";
+        } else {
+          const disagreement = originalBest.probability - originalBest.referencePrice;
+          if (!(disagreement > 0)) {
+            strategyGateReason = `Expected positive forecast/market disagreement; got ${disagreement.toFixed(3)}.`;
+          } else {
+            const anchored = priceWeatherMarketAnchor({
+              coefficient: options.marketAnchor.coefficient,
+              originalFair: originalBest.probability,
+              originalReferencePrice: originalBest.referencePrice,
+              originalExecutionPrice: originalBest.price,
+              oppositeExecutionPrice: oppositeAsk
+            });
+            if (originalBest.side === "YES") {
+              fairYes = anchored.anchoredOriginalProbability;
+              fairNo = anchored.selectedFair;
+              yesEdge = yesAsk === undefined ? undefined : fairYes - yesAsk;
+              noEdge = anchored.edge;
+              bestSignal = {
+                side: "NO",
+                signal: "BUY_NO",
+                edge: noEdge,
+                price: noAsk,
+                probability: fairNo,
+                referencePrice: noReferencePrice,
+                oppositeReferencePrice: yesReferencePrice,
+                tokenId: marketToken(candidate, "No")
+              };
+            } else {
+              fairNo = anchored.anchoredOriginalProbability;
+              fairYes = anchored.selectedFair;
+              yesEdge = anchored.edge;
+              noEdge = noAsk === undefined ? undefined : fairNo - noAsk;
+              bestSignal = {
+                side: "YES",
+                signal: "BUY_YES",
+                edge: yesEdge,
+                price: yesAsk,
+                probability: fairYes,
+                referencePrice: yesReferencePrice,
+                oppositeReferencePrice: noReferencePrice,
+                tokenId: marketToken(candidate, "Yes")
+              };
+            }
+            if (bestSignal.edge === undefined || bestSignal.edge < options.marketAnchor.minExecutableEdge) {
+              strategyGateReason = `Inverse edge ${(bestSignal.edge ?? 0).toFixed(3)} is below executable minimum ${options.marketAnchor.minExecutableEdge.toFixed(3)}.`;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const requiredSignalEdge = strategy === "market_informed_inverse"
+    ? options.marketAnchor?.minExecutableEdge ?? Infinity
+    : threshold;
+  const signal = strategyGateReason === undefined && bestSignal.edge !== undefined && bestSignal.edge >= requiredSignalEdge
     ? bestSignal.signal
     : "SKIP";
   const sizing = signal === "SKIP" || bestSignal.price === undefined
@@ -660,9 +804,18 @@ function priceCandidate(
     suggestedSizeUsd: sizing.stakeUsd,
     tokenId: signal === "SKIP" ? undefined : bestSignal.tokenId,
     price: signal === "SKIP" ? undefined : bestSignal.price,
+    strategy,
+    originalBestSide: originalBest.side,
+    originalEdge: originalBest.edge,
+    originalFair: originalBest.probability,
+    originalReferencePrice: originalBest.referencePrice,
+    oppositeMarketProbability,
+    marketAnchorCoefficient,
     reason: signal === "SKIP"
-      ? `Best edge ${(bestSignal.edge ?? 0).toFixed(3)} is below threshold ${threshold.toFixed(3)}.`
-      : `${signal} edge ${(bestSignal.edge ?? 0).toFixed(3)} >= threshold ${threshold.toFixed(3)}.`
+      ? strategyGateReason ?? `Best edge ${(bestSignal.edge ?? 0).toFixed(3)} is below threshold ${requiredSignalEdge.toFixed(3)}.`
+      : strategy === "market_informed_inverse"
+        ? `${signal} from weak market-informed inversion: original ${originalBest.side} forecast edge ${(originalBest.edge ?? 0).toFixed(3)}, coefficient ${marketAnchorCoefficient?.toFixed(2)}, inverse edge ${(bestSignal.edge ?? 0).toFixed(3)}.`
+        : `${signal} edge ${(bestSignal.edge ?? 0).toFixed(3)} >= threshold ${threshold.toFixed(3)}.`
   };
 }
 
@@ -678,6 +831,14 @@ function applyCityPortfolioSizing(
   consensus: WeatherConsensus,
   options: WeatherPricingOptions
 ): WeatherOutcomePricing[] {
+  if (options.strategy === "market_informed_inverse") {
+    return outcomes.map((outcome) => outcome.signal === "SKIP"
+      ? outcome
+      : {
+        ...outcome,
+        reason: `${outcome.reason} Sized with independent Kelly; the city/day exposure cap is enforced during execution because the market-informed probabilities do not imply a coherent temperature distribution.`
+      });
+  }
   const optimizerInputs: WeatherPortfolioCandidate[] = outcomes.flatMap((outcome, index) => {
     const side = sideForSignal(outcome.signal);
     const market = candidates[index];

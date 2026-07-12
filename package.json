@@ -34,6 +34,7 @@
     "weather:midday": "node --import tsx src/cli.ts weather:midday",
     "weather:backtest": "node --import tsx src/cli.ts weather:backtest",
     "weather:backtest:markets": "node --import tsx src/cli.ts weather:backtest:markets",
+    "weather:backtest:inverse-grid": "node --import tsx src/cli.ts weather:backtest:inverse-grid",
     "weather:backtest:replay": "node --import tsx src/cli.ts weather:backtest:replay",
     "weather:resolution-audit": "node --import tsx src/cli.ts weather:resolution-audit",
     "weather:reinvest": "node --import tsx src/cli.ts weather:reinvest",

@@ -1,6 +1,7 @@
 import type { AppConfig } from "./config.js";
 import { parseGammaList } from "./marketplaces/polymarketData.js";
 import {
+  type WeatherMarketSnapshotRecord,
   type WeatherObservationRecord,
   type WeatherPreviousRunForecastRecord,
   type WeatherResolutionActualRecord,
@@ -61,6 +62,7 @@ const POLYMARKET_GAMMA_BASE_URL = "https://gamma-api.polymarket.com";
 
 export interface WeatherMarketBacktestOptions {
   date: string;
+  marketSource?: "gamma" | "snapshot";
   leadDays?: number;
   bankrollUsd?: number;
   minEdge?: number;
@@ -200,6 +202,7 @@ export interface WeatherMarketBacktestReport {
     portfolioStepUsd?: number;
   };
   execution: {
+    marketSource: "gamma" | "snapshot";
     entryMode: WeatherBacktestEntryMode;
     fillSlippage: number;
     minExecutableEdge: number;
@@ -545,6 +548,55 @@ export async function fetchClosedWeatherMarkets(date: string, options: { limit: 
   return markets;
 }
 
+export function closedWeatherMarketsFromSnapshots(
+  records: WeatherMarketSnapshotRecord[],
+  date: string
+): { capturedAt: string; markets: ClosedWeatherMarket[] } {
+  const captures = new Map<string, WeatherMarketSnapshotRecord[]>();
+  for (const record of records) {
+    if (record.date !== date || !record.closed) continue;
+    const capture = captures.get(record.capturedAt) ?? [];
+    capture.push(record);
+    captures.set(record.capturedAt, capture);
+  }
+  const selected = [...captures.entries()]
+    .sort(([firstCapturedAt, first], [secondCapturedAt, second]) => (
+      second.length - first.length || secondCapturedAt.localeCompare(firstCapturedAt)
+    ))[0];
+  if (!selected) {
+    throw new Error(`No closed stored weather-market snapshot found for ${date}.`);
+  }
+
+  const [capturedAt, selectedRecords] = selected;
+  const seen = new Set<string>();
+  const markets = selectedRecords.flatMap((record): ClosedWeatherMarket[] => {
+    const key = `${record.eventSlug}|${record.marketSlug}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    const yesToken = record.tokens.find((token) => token.outcome.toLowerCase() === "yes");
+    return [{
+      eventSlug: record.eventSlug,
+      eventTitle: record.eventTitle,
+      eventEndDate: record.eventEndDate,
+      marketSlug: record.marketSlug,
+      question: record.question,
+      parsed: {
+        city: record.city,
+        date: record.date,
+        measure: record.measure,
+        outcome: record.outcome
+      },
+      yesTokenId: yesToken?.tokenId,
+      resolutionSource: record.resolutionSource,
+      resolvedYes: record.resolvedYes
+    }];
+  });
+  if (markets.length === 0) {
+    throw new Error(`Stored weather-market snapshot ${capturedAt} had no usable markets for ${date}.`);
+  }
+  return { capturedAt, markets };
+}
+
 export async function fetchTokenPriceHistory(tokenId: string): Promise<PricePoint[]> {
   const url = new URL("/prices-history", "https://clob.polymarket.com");
   url.searchParams.set("market", tokenId);
@@ -656,6 +708,7 @@ export async function runWeatherMarketBacktest(
   options: WeatherMarketBacktestOptions
 ): Promise<WeatherMarketBacktestReport> {
   const leadDays = Math.max(1, Math.trunc(options.leadDays ?? 1));
+  const marketSource = options.marketSource ?? "gamma";
   const bankrollUsd = options.bankrollUsd ?? 100;
   const minEdge = options.minEdge ?? 0.05;
   const sources = options.sources && options.sources.length > 0
@@ -694,15 +747,20 @@ export async function runWeatherMarketBacktest(
   );
   const cityBiasPriorWeight = Math.max(0, options.cityBiasPriorWeight ?? DEFAULT_CITY_BIAS_PRIOR_WEIGHT);
 
-  const [observations, previousRuns, resolutionActuals, markets] = await Promise.all([
+  const [observations, previousRuns, resolutionActuals, marketSnapshots] = await Promise.all([
     readJsonlRecords<WeatherObservationRecord>(config.weather.datasets.observationsPath),
     readJsonlRecords<WeatherPreviousRunForecastRecord>(config.weather.datasets.previousRunForecastsPath),
     readJsonlRecords<WeatherResolutionActualRecord>(config.weather.datasets.resolutionActualsPath),
-    fetchClosedWeatherMarkets(options.date, {
+    marketSource === "snapshot"
+      ? readJsonlRecords<WeatherMarketSnapshotRecord>(config.weather.datasets.marketSnapshotsPath)
+      : Promise.resolve([])
+  ]);
+  const markets = marketSource === "snapshot"
+    ? closedWeatherMarketsFromSnapshots(marketSnapshots, options.date).markets
+    : await fetchClosedWeatherMarkets(options.date, {
       limit: Math.min(Math.max(Math.trunc(options.limit ?? 100), 1), 100),
       maxPages: Math.max(Math.trunc(options.maxPages ?? 20), 1)
-    })
-  ]);
+    });
   const actualIndex = buildWeatherActualIndex(observations, resolutionActuals);
   const forecastValuesByKey = buildPreviousRunForecastValueIndex(previousRuns, { leadDays, sources });
   const targetMetadata = buildForecastTargetMetadataIndex(previousRuns);
@@ -1007,6 +1065,7 @@ export async function runWeatherMarketBacktest(
       portfolioStepUsd: sizingStrategy === "city_portfolio" ? portfolioStepUsd : undefined
     },
     execution: {
+      marketSource,
       entryMode,
       fillSlippage,
       minExecutableEdge,

@@ -2,11 +2,38 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   isRetryableVistadexExecutionError,
+  requireReinvestPricingStrategy,
   vistadexExecutionRetryDelayMs,
   weatherReinvestExecutionFailures
 } from "../src/weatherReinvest.js";
 
 describe("WeatherEdge Vistadex execution retry helpers", () => {
+  it("requires an explicit live pricing strategy", () => {
+    assert.throws(
+      () => requireReinvestPricingStrategy({}),
+      /requires --strategy/
+    );
+  });
+
+  it("requires explicit parameters for market-informed inversion", () => {
+    assert.throws(
+      () => requireReinvestPricingStrategy({ strategy: "market_informed_inverse" }),
+      /market-anchor-coefficient/
+    );
+    assert.deepEqual(requireReinvestPricingStrategy({
+      strategy: "market_informed_inverse",
+      marketAnchorCoefficient: -0.25,
+      marketAnchorMinOppositeMarketProbability: 0.5
+    }), {
+      strategy: "market_informed_inverse",
+      marketAnchor: {
+        coefficient: -0.25,
+        minOppositeMarketProbability: 0.5,
+        minExecutableEdge: 0.03
+      }
+    });
+  });
+
   it("retries transient Vistadex filler and transport failures", () => {
     assert.equal(isRetryableVistadexExecutionError(new Error("Timed out waiting for filler action")), true);
     assert.equal(isRetryableVistadexExecutionError(new Error("WebSocket closed while waiting for filler action")), true);

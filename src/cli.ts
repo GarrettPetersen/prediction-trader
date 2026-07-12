@@ -99,7 +99,8 @@ import {
   priceWeatherMarketGroup,
   rankWeatherSignals,
   type WeatherOutcomePricing,
-  type WeatherPricingReport
+  type WeatherPricingReport,
+  type WeatherTradingStrategy
 } from "./weatherPricing.js";
 import {
   computeWeatherEdgeReport,
@@ -107,9 +108,14 @@ import {
   type WeatherEdgeRow
 } from "./weatherEdges.js";
 import {
+  addDaysIso,
   runWeatherMarketBacktest,
   type WeatherBacktestTrade
 } from "./weatherBacktest.js";
+import {
+  evaluateWeatherInverseGrid,
+  type WeatherInverseModelSummary
+} from "./weatherInverseModels.js";
 import {
   runWeatherReplayBacktest,
   type WeatherReplayEvent
@@ -673,6 +679,13 @@ function compactWeatherSignal(signal: WeatherOutcomePricing) {
     suggestedSizeUsd: signal.suggestedSizeUsd,
     tokenId: signal.tokenId,
     price: signal.price,
+    strategy: signal.strategy,
+    originalBestSide: signal.originalBestSide,
+    originalEdge: signal.originalEdge,
+    originalFair: signal.originalFair,
+    originalReferencePrice: signal.originalReferencePrice,
+    oppositeMarketProbability: signal.oppositeMarketProbability,
+    marketAnchorCoefficient: signal.marketAnchorCoefficient,
     reason: signal.reason
   };
 }
@@ -940,6 +953,33 @@ function compactWeatherBacktestTrade(trade: WeatherBacktestTrade) {
     entryTimezone: trade.entryTimezone,
     priceTime: trade.priceTime,
     priceAgeHours: round(trade.priceAgeHours, 2)
+  };
+}
+
+function compactWeatherInverseSummary(summary: WeatherInverseModelSummary, includeDaily = true) {
+  const compact = {
+    model: summary.model,
+    days: summary.days,
+    candidateCount: summary.candidateCount,
+    tradeCount: summary.tradeCount,
+    wins: summary.wins,
+    losses: summary.losses,
+    winningDays: summary.winningDays,
+    losingDays: summary.losingDays,
+    stakeUsd: round(summary.stakeUsd, 2),
+    payoutUsd: round(summary.payoutUsd, 2),
+    pnlUsd: round(summary.pnlUsd, 2),
+    roiOnStake: round(summary.roiOnStake, 4)
+  };
+  if (!includeDaily) return compact;
+  return {
+    ...compact,
+    daily: summary.daily.map((day) => ({
+      ...day,
+      stakeUsd: round(day.stakeUsd, 2),
+      payoutUsd: round(day.payoutUsd, 2),
+      pnlUsd: round(day.pnlUsd, 2)
+    }))
   };
 }
 
@@ -1292,6 +1332,16 @@ function weatherReinvestConfidenceArg(args: Args): WeatherReinvestConfidence | u
   throw new Error("--min-confidence must be low, medium, or high.");
 }
 
+function weatherTradingStrategyArg(args: Args): WeatherTradingStrategy | undefined {
+  const value = stringArg(args, "strategy", false);
+  if (value === undefined) return undefined;
+  if (value === "forecast-edge" || value === "forecast_edge") return "forecast_edge";
+  if (value === "market-informed-inverse" || value === "market_informed_inverse") {
+    return "market_informed_inverse";
+  }
+  throw new Error("--strategy must be forecast-edge or market-informed-inverse.");
+}
+
 function previousRunSourcesArg(args: Args): OpenMeteoPreviousRunSourceId[] | undefined {
   const values = listArg(args, "sources", false);
   if (values.length === 0) return undefined;
@@ -1376,9 +1426,10 @@ Commands:
   weather:midday (--held-vistadex | --slug SLUG | --slugs SLUG[,SLUG...]) [--date YYYY-MM-DD] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko] [--metar-hours N] [--top N | --all] [--signals-only] [--reports] [--resolution-actuals] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N]
   weather:backtest --city CITY [--country CODE] --date YYYY-MM-DD [--measure temperature_high|temperature_low] [--years N] [--threshold N]
   weather:backtest:markets --date YYYY-MM-DD [--lead-days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--sizing independent-kelly|city-portfolio] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--max-group-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--entry-mode event-end-minus-lead|cron-entry-window] [--high-entry-start-local-time HH:MM] [--high-entry-end-local-time HH:MM] [--low-entry-start-local-time HH:MM] [--low-entry-end-local-time HH:MM] [--cron-interval-hours N] [--cron-hour-offset N] [--cron-minute N] [--fill-slippage N] [--min-executable-edge N]
+  weather:backtest:inverse-grid --start-date YYYY-MM-DD --end-date YYYY-MM-DD --holdout-start-date YYYY-MM-DD [--bankroll N] [--min-edge N] [--min-trade-price N] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--max-group-fraction N] [--fill-slippage N] [--min-executable-edge N] [--top N]
   weather:backtest:replay --start ISO [--end ISO | --days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--max-per-trade N] [--max-buy-spend-fraction N] [--max-group-fraction N] [--target-cash-reserve N] [--sell-threshold N] [--settlement-lag-hours N] [--kelly-multiplier N] [--max-kelly-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--price-history-path PATH] [--fetch-price-history] [--strict] [--high-entry-start-local-time HH:MM] [--high-entry-end-local-time HH:MM] [--low-entry-start-local-time HH:MM] [--low-entry-end-local-time HH:MM] [--cron-interval-hours N] [--cron-hour-offset N] [--cron-minute N]
   weather:resolution-audit [--date YYYY-MM-DD | --days-ahead N] [--status active|closed] [--distance-ok-km N] [--distance-warn-km N] [--top N]
-  weather:reinvest [--execute] [--pause-buys] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--max-buy-spend-usd N] [--max-buy-spend-fraction N] [--min-edge N] [--min-cash-to-reinvest N] [--target-cash-reserve N] [--min-confidence low|medium|high] [--require-recent-audit-positive] [--audit-lookback-hours N] [--audit-min-positions N] [--no-calibration] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--high-entry-start-local-time HH:MM] [--high-entry-end-local-time HH:MM] [--low-entry-start-local-time HH:MM] [--low-entry-end-local-time HH:MM] [--max-model-run-age-hours N] [--vistadex-quote-timeout-ms N] [--vistadex-filler-timeout-ms N] [--vistadex-max-attempts N] [--vistadex-retry-backoff-ms N] [--report-path PATH]
+  weather:reinvest [--execute] [--pause-buys] --strategy forecast-edge|market-informed-inverse [--market-anchor-coefficient N] [--market-anchor-min-opposite-probability N] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--max-buy-spend-usd N] [--max-buy-spend-fraction N] [--min-edge N] [--min-cash-to-reinvest N] [--target-cash-reserve N] [--min-confidence low|medium|high] [--require-recent-audit-positive] [--audit-lookback-hours N] [--audit-min-positions N] [--no-calibration] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--high-entry-start-local-time HH:MM] [--high-entry-end-local-time HH:MM] [--low-entry-start-local-time HH:MM] [--low-entry-end-local-time HH:MM] [--max-model-run-age-hours N] [--vistadex-quote-timeout-ms N] [--vistadex-filler-timeout-ms N] [--vistadex-max-attempts N] [--vistadex-retry-backoff-ms N] [--report-path PATH]
   weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N]
   weather:dataset:observations (--city CITY [--country CODE] | --latitude N --longitude N) --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--ncei-station ID | --ncei-location ID] [--path PATH]
   weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--closed] [--descending] [--path PATH]
@@ -1670,6 +1721,139 @@ async function run(): Promise<void> {
     return;
   }
 
+  if (command === "weather:backtest:inverse-grid") {
+    const startDate = requiredStringArg(args, "start-date");
+    const endDate = requiredStringArg(args, "end-date");
+    const holdoutStartDate = requiredStringArg(args, "holdout-start-date");
+    for (const [name, value] of Object.entries({ startDate, endDate, holdoutStartDate })) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(`${value}T00:00:00Z`))) {
+        throw new Error(`${name} must be a valid YYYY-MM-DD date.`);
+      }
+    }
+    if (startDate > endDate) throw new Error("--start-date must not be after --end-date.");
+    if (holdoutStartDate <= startDate || holdoutStartDate > endDate) {
+      throw new Error("--holdout-start-date must be after --start-date and no later than --end-date.");
+    }
+
+    const bankrollUsd = numberArg(args, "bankroll", false) ?? 100;
+    const minEdge = numberArg(args, "min-edge", false) ?? 0.2;
+    const minTradePrice = numberArg(args, "min-trade-price", false) ?? 0.001;
+    const kellyMultiplier = numberArg(args, "kelly-multiplier", false) ?? 0.25;
+    const maxKellyFraction = numberArg(args, "max-kelly-fraction", false) ?? 0.25;
+    const maxPerTradeUsd = numberArg(args, "max-per-trade", false) ?? 1;
+    const maxPortfolioFraction = numberArg(args, "max-portfolio-fraction", false) ?? 0.05;
+    const maxGroupFraction = numberArg(args, "max-group-fraction", false) ?? 0.25;
+    const fillSlippage = numberArg(args, "fill-slippage", false) ?? 0.02;
+    const minExecutableEdge = numberArg(args, "min-executable-edge", false) ?? 0.03;
+    const minTrainingTrades = numberArg(args, "min-training-trades", false) ?? 10;
+    const top = Math.max(1, Math.trunc(numberArg(args, "top", false) ?? 10));
+
+    const dates: string[] = [];
+    for (let date = startDate; date <= endDate; date = addDaysIso(date, 1)) dates.push(date);
+    const dayInputs = [];
+    const coverage = [];
+    for (const date of dates) {
+      const report = await runWeatherMarketBacktest(config, {
+        date,
+        marketSource: "snapshot",
+        leadDays: 1,
+        bankrollUsd,
+        minEdge,
+        minTradePrice,
+        sizingStrategy: "independent_kelly",
+        kellyMultiplier,
+        maxKellyFraction,
+        maxPerTradeUsd,
+        maxPortfolioFraction: 1,
+        maxGroupFraction: 1,
+        entryMode: "cron_entry_window",
+        highEntryStartLocalMinutes: 20 * 60,
+        highEntryEndLocalMinutes: 23 * 60 + 30,
+        lowEntryStartLocalMinutes: 11 * 60,
+        lowEntryEndLocalMinutes: 14 * 60 + 30,
+        cronIntervalHours: 3,
+        cronHourOffset: 2,
+        cronMinute: 15,
+        fillSlippage,
+        minExecutableEdge,
+        maxStalenessHours: 12
+      });
+      if (report.summary.binaryMarkets === 0) {
+        throw new Error(`Inverse grid found no closed weather markets for ${date}.`);
+      }
+      if (report.summary.scoredMarkets === 0) {
+        throw new Error(`Inverse grid scored no weather markets for ${date}.`);
+      }
+      if (report.summary.skippedNoPrice > 0) {
+        throw new Error(`Inverse grid could not obtain entry prices for ${report.summary.skippedNoPrice} markets on ${date}.`);
+      }
+      dayInputs.push({ date, trades: report.trades });
+      coverage.push({
+        date,
+        binaryMarkets: report.summary.binaryMarkets,
+        scoredMarkets: report.summary.scoredMarkets,
+        candidateUniverse: report.trades.length,
+        skippedNoForecast: report.summary.skippedNoForecast,
+        skippedNoActual: report.summary.skippedNoActual,
+        skippedNoDecisionTime: report.summary.skippedNoDecisionTime
+      });
+    }
+
+    const grid = evaluateWeatherInverseGrid({
+      train: dayInputs.filter((day) => day.date < holdoutStartDate),
+      holdout: dayInputs.filter((day) => day.date >= holdoutStartDate),
+      minTrainingTrades,
+      options: {
+        bankrollUsd,
+        kellyMultiplier,
+        maxKellyFraction,
+        maxPerTradeUsd,
+        maxPortfolioFraction,
+        maxGroupFraction,
+        minExecutableEdge,
+        minTradePrice
+      }
+    });
+    const holdoutById = new Map(grid.holdout.map((summary) => [summary.model.id, summary]));
+    const baselineTrain = grid.train.find((summary) => summary.model.id === "forecast-edge");
+    const baselineHoldout = holdoutById.get("forecast-edge");
+    if (!baselineTrain || !baselineHoldout) throw new Error("Inverse grid did not produce the forecast-edge baseline.");
+    print({
+      period: { startDate, endDate, holdoutStartDate },
+      assumptions: {
+        bankrollUsd,
+        minEdge,
+        minTradePrice,
+        kellyMultiplier,
+        maxKellyFraction,
+        maxPerTradeUsd,
+        maxPortfolioFraction,
+        maxGroupFraction,
+        fillSlippage,
+        minExecutableEdge,
+        minTrainingTrades,
+        note: "Models are selected on training PnL only. Holdout ranking is retrospective and must not be used as model-selection evidence."
+      },
+      coverage,
+      selected: {
+        model: grid.selectedModel,
+        train: compactWeatherInverseSummary(grid.selectedTrain),
+        holdout: compactWeatherInverseSummary(grid.selectedHoldout)
+      },
+      forecastEdgeBaseline: {
+        train: compactWeatherInverseSummary(baselineTrain),
+        holdout: compactWeatherInverseSummary(baselineHoldout)
+      },
+      trainingRanking: grid.train.slice(0, top).map((summary) => ({
+        eligible: summary.tradeCount >= minTrainingTrades,
+        train: compactWeatherInverseSummary(summary, false),
+        holdout: compactWeatherInverseSummary(holdoutById.get(summary.model.id) as WeatherInverseModelSummary, false)
+      })),
+      retrospectiveHoldoutRanking: grid.holdout.slice(0, top).map((summary) => compactWeatherInverseSummary(summary, false))
+    });
+    return;
+  }
+
   if (command === "weather:backtest:markets") {
     rejectArgs(
       args,
@@ -1915,6 +2099,9 @@ async function run(): Promise<void> {
       highGraceMinutes: numberArg(args, "high-grace-minutes", false),
       lowGraceMinutes: numberArg(args, "low-grace-minutes", false),
       bankrollUsd: numberArg(args, "bankroll", false),
+      strategy: weatherTradingStrategyArg(args),
+      marketAnchorCoefficient: numberArg(args, "market-anchor-coefficient", false),
+      marketAnchorMinOppositeMarketProbability: numberArg(args, "market-anchor-min-opposite-probability", false),
       maxPerTradeUsd: numberArg(args, "max-per-trade", false) ?? numberArg(args, "max-usd", false),
       kellyMultiplier: numberArg(args, "kelly-multiplier", false),
       maxKellyFraction: numberArg(args, "max-kelly-fraction", false),

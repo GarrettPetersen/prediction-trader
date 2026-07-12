@@ -240,6 +240,23 @@ describe("weather pricing math", () => {
       assert.equal(report.climatology, undefined);
       assert.equal(report.outcomes[0].signal, "BUY_YES");
       assert.ok(report.outcomes[0].fairYes > 0.5);
+
+      const inverse = await priceWeatherMarketGroup(config, group, {
+        minEdge: 0.3,
+        strategy: "market_informed_inverse",
+        marketAnchor: {
+          coefficient: -0.25,
+          minOppositeMarketProbability: 0.5,
+          minExecutableEdge: 0.03
+        }
+      });
+      assert.equal(inverse.outcomes[0].signal, "BUY_NO");
+      assert.equal(inverse.outcomes[0].strategy, "market_informed_inverse");
+      assert.equal(inverse.outcomes[0].originalBestSide, "YES");
+      assert.ok((inverse.outcomes[0].originalEdge ?? 0) >= 0.3);
+      assert.equal(inverse.outcomes[0].oppositeMarketProbability, 0.8);
+      assert.equal(inverse.outcomes[0].marketAnchorCoefficient, -0.25);
+      assert.ok((inverse.outcomes[0].edge ?? 0) >= 0.03);
     } finally {
       globalThis.fetch = originalFetch;
     }

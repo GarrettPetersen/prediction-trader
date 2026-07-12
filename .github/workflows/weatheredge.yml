@@ -27,10 +27,13 @@ jobs:
       TZ: America/Vancouver
       WEATHEREDGE_LIVE: ${{ vars.WEATHEREDGE_LIVE || '0' }}
       WEATHEREDGE_BANKROLL: ${{ vars.WEATHEREDGE_BANKROLL }}
-      WEATHEREDGE_MAX_PER_TRADE: ${{ vars.WEATHEREDGE_MAX_PER_TRADE || '1' }}
+      WEATHEREDGE_STRATEGY: ${{ vars.WEATHEREDGE_STRATEGY }}
+      WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT: ${{ vars.WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT }}
+      WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY: ${{ vars.WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY }}
+      WEATHEREDGE_MAX_PER_TRADE: ${{ vars.WEATHEREDGE_MAX_PER_TRADE }}
       WEATHEREDGE_MAX_BUYS: ${{ vars.WEATHEREDGE_MAX_BUYS || '8' }}
       WEATHEREDGE_MAX_GROUP_FRACTION: ${{ vars.WEATHEREDGE_MAX_GROUP_FRACTION || '0.25' }}
-      WEATHEREDGE_MAX_BUY_SPEND_FRACTION: ${{ vars.WEATHEREDGE_MAX_BUY_SPEND_FRACTION || '0.05' }}
+      WEATHEREDGE_MAX_BUY_SPEND_FRACTION: ${{ vars.WEATHEREDGE_MAX_BUY_SPEND_FRACTION }}
       WEATHEREDGE_MAX_BUY_SPEND_USD: ${{ vars.WEATHEREDGE_MAX_BUY_SPEND_USD }}
       WEATHEREDGE_KELLY_MULTIPLIER: ${{ vars.WEATHEREDGE_KELLY_MULTIPLIER || '0.25' }}
       WEATHEREDGE_MAX_KELLY_FRACTION: ${{ vars.WEATHEREDGE_MAX_KELLY_FRACTION || '0.25' }}
@@ -57,7 +60,7 @@ jobs:
       WEATHEREDGE_DATA_ASSET: ${{ vars.WEATHEREDGE_DATA_ASSET || 'weatheredge-data.tar.gz' }}
       WEATHEREDGE_SHOULD_EXECUTE: ${{ github.event_name == 'schedule' || inputs.execute == 'true' }}
       PREDICTION_TRADER_LIVE: ${{ vars.WEATHEREDGE_LIVE || '0' }}
-      PREDICTION_TRADER_MAX_USD: ${{ vars.PREDICTION_TRADER_MAX_USD || vars.WEATHEREDGE_MAX_PER_TRADE || '10' }}
+      PREDICTION_TRADER_MAX_USD: ${{ vars.PREDICTION_TRADER_MAX_USD }}
       PREDICTION_TRADER_LEDGER_PATH: data/trades/ledger.jsonl
       WEATHER_CACHE_DIR: .cache/weatheredge
       VISTADEX_CLIENT_API_KEY: ${{ secrets.VISTADEX_CLIENT_API_KEY }}
@@ -140,8 +143,32 @@ jobs:
             echo "WEATHEREDGE_MIN_EDGE repo variable is required; refusing to run live trading with an implicit edge threshold."
             exit 1
           fi
+          if [ -z "${WEATHEREDGE_STRATEGY}" ]; then
+            echo "WEATHEREDGE_STRATEGY repo variable is required; refusing to run live trading with an implicit model."
+            exit 1
+          fi
+          if [ -z "${WEATHEREDGE_MAX_BUY_SPEND_FRACTION}" ]; then
+            echo "WEATHEREDGE_MAX_BUY_SPEND_FRACTION repo variable is required; refusing to run without an explicit account-wide buy budget."
+            exit 1
+          fi
+          if [ -z "${PREDICTION_TRADER_MAX_USD}" ]; then
+            echo "PREDICTION_TRADER_MAX_USD repo variable is required as an execution safety ceiling."
+            exit 1
+          fi
 
-          ARGS="--days-ahead 1 --max-per-trade ${WEATHEREDGE_MAX_PER_TRADE} --max-buys ${WEATHEREDGE_MAX_BUYS} --max-group-fraction ${WEATHEREDGE_MAX_GROUP_FRACTION} --max-buy-spend-fraction ${WEATHEREDGE_MAX_BUY_SPEND_FRACTION} --kelly-multiplier ${WEATHEREDGE_KELLY_MULTIPLIER} --max-kelly-fraction ${WEATHEREDGE_MAX_KELLY_FRACTION} --min-edge ${WEATHEREDGE_MIN_EDGE} --min-confidence ${WEATHEREDGE_MIN_CONFIDENCE} --min-cash-to-reinvest ${WEATHEREDGE_MIN_CASH_TO_REINVEST} --target-cash-reserve ${WEATHEREDGE_TARGET_CASH_RESERVE} --high-entry-start-local-time ${WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME} --high-entry-end-local-time ${WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME} --low-entry-start-local-time ${WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME} --low-entry-end-local-time ${WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME} --max-model-run-age-hours ${WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS} --vistadex-quote-timeout-ms ${WEATHEREDGE_VISTADEX_QUOTE_TIMEOUT_MS} --vistadex-filler-timeout-ms ${WEATHEREDGE_VISTADEX_FILLER_TIMEOUT_MS} --vistadex-max-attempts ${WEATHEREDGE_VISTADEX_MAX_ATTEMPTS} --vistadex-retry-backoff-ms ${WEATHEREDGE_VISTADEX_RETRY_BACKOFF_MS} --report-path data/trades/weatheredge-report.json"
+          ARGS="--days-ahead 1 --strategy ${WEATHEREDGE_STRATEGY} --max-buys ${WEATHEREDGE_MAX_BUYS} --max-group-fraction ${WEATHEREDGE_MAX_GROUP_FRACTION} --max-buy-spend-fraction ${WEATHEREDGE_MAX_BUY_SPEND_FRACTION} --kelly-multiplier ${WEATHEREDGE_KELLY_MULTIPLIER} --max-kelly-fraction ${WEATHEREDGE_MAX_KELLY_FRACTION} --min-edge ${WEATHEREDGE_MIN_EDGE} --min-confidence ${WEATHEREDGE_MIN_CONFIDENCE} --min-cash-to-reinvest ${WEATHEREDGE_MIN_CASH_TO_REINVEST} --target-cash-reserve ${WEATHEREDGE_TARGET_CASH_RESERVE} --high-entry-start-local-time ${WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME} --high-entry-end-local-time ${WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME} --low-entry-start-local-time ${WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME} --low-entry-end-local-time ${WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME} --max-model-run-age-hours ${WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS} --vistadex-quote-timeout-ms ${WEATHEREDGE_VISTADEX_QUOTE_TIMEOUT_MS} --vistadex-filler-timeout-ms ${WEATHEREDGE_VISTADEX_FILLER_TIMEOUT_MS} --vistadex-max-attempts ${WEATHEREDGE_VISTADEX_MAX_ATTEMPTS} --vistadex-retry-backoff-ms ${WEATHEREDGE_VISTADEX_RETRY_BACKOFF_MS} --report-path data/trades/weatheredge-report.json"
+
+          if [ "${WEATHEREDGE_STRATEGY}" = "market-informed-inverse" ] || [ "${WEATHEREDGE_STRATEGY}" = "market_informed_inverse" ]; then
+            if [ -z "${WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT}" ] || [ -z "${WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY}" ]; then
+              echo "The market-informed inverse strategy requires explicit market-anchor coefficient and opposite-probability variables."
+              exit 1
+            fi
+            ARGS="${ARGS} --market-anchor-coefficient ${WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT} --market-anchor-min-opposite-probability ${WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY}"
+          fi
+
+          if [ -n "${WEATHEREDGE_MAX_PER_TRADE}" ]; then
+            ARGS="${ARGS} --max-per-trade ${WEATHEREDGE_MAX_PER_TRADE}"
+          fi
 
           if [ -n "${WEATHEREDGE_MAX_BUY_SPEND_USD}" ]; then
             ARGS="${ARGS} --max-buy-spend-usd ${WEATHEREDGE_MAX_BUY_SPEND_USD}"
