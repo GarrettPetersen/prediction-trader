@@ -519,7 +519,7 @@ npm run weather:reinvest -- \
   --min-edge 0.30 \
   --min-cash-to-reinvest 5 \
   --target-cash-reserve 20 \
-  --min-confidence medium \
+  --min-confidence low \
   --pause-buys \
   --require-recent-audit-positive \
   --audit-lookback-hours 72 \
@@ -620,7 +620,7 @@ WEATHEREDGE_MAX_BUY_SPEND_USD=
 WEATHEREDGE_KELLY_MULTIPLIER=0.25
 WEATHEREDGE_MAX_KELLY_FRACTION=0.25
 WEATHEREDGE_MIN_EDGE=0.30
-WEATHEREDGE_MIN_CONFIDENCE=medium
+WEATHEREDGE_MIN_CONFIDENCE=low
 WEATHEREDGE_MIN_CASH_TO_REINVEST=5
 WEATHEREDGE_TARGET_CASH_RESERVE=20
 WEATHEREDGE_PAUSE_BUYS=false
@@ -653,6 +653,12 @@ It does not make risk unlimited: fractional Kelly, the 25% account-wide buy
 budget, the 25% city/station/day cap, available cash, and the `$20` reserve
 still bind. `PREDICTION_TRADER_MAX_USD=1000` is a deliberately nonbinding
 execution safety ceiling for this small account.
+
+`WEATHEREDGE_MIN_CONFIDENCE=low` matches the selected inverse-grid backtest,
+which did not discard candidates based on forecast-model agreement. This does
+not permit uncalibrated signals: live rows still require historical residuals,
+an exact station/feed match, fresh source cycles, the entry window, and all
+market-anchor gates.
 
 The scheduled reinvestment loop has no `WEATHEREDGE_SKIP_CALIBRATION` escape
 hatch. If calibration datasets are missing, unreadable, or unable to produce
