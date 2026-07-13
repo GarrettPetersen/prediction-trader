@@ -107,6 +107,8 @@ export interface WeatherReinvestOptions extends Pick<
   highEntryEndLocalMinutes?: number;
   lowEntryStartLocalMinutes?: number;
   lowEntryEndLocalMinutes?: number;
+  inverseLowEntryStartLocalMinutes?: number;
+  inverseLowEntryEndLocalMinutes?: number;
   maxModelRunAgeHours?: number;
   requireRecentAuditPositive?: boolean;
   auditLookbackHours?: number;
@@ -164,7 +166,7 @@ export interface WeatherReinvestTradeResult {
   originalReferencePrice?: number;
   oppositeMarketProbability?: number;
   marketAnchorCoefficient?: number;
-  entryWindow?: WeatherEntryWindowAssessment;
+  entryWindow?: WeatherReinvestEntryWindowAssessment;
 }
 
 export interface WeatherReinvestExecutionAttempt {
@@ -197,6 +199,7 @@ export interface WeatherReinvestReport {
   buyLaneBudgetsUsd?: WeatherReinvestLaneAmounts;
   buyLaneSpendUsd?: WeatherReinvestLaneAmounts;
   targetDate: string;
+  entryWindows: WeatherReinvestEntryWindows;
   vistadexExecution: {
     quoteTimeoutMs: number;
     fillerTimeoutMs: number;
@@ -218,6 +221,27 @@ export interface WeatherReinvestReport {
 export interface WeatherReinvestLaneAmounts {
   normalAgreement: number;
   inverseDisagreement: number;
+}
+
+export interface WeatherReinvestEntryWindows {
+  high: {
+    startLocalMinutes: number;
+    endLocalMinutes: number;
+  };
+  low: {
+    startLocalMinutes: number;
+    endLocalMinutes: number;
+  };
+  inverseLow?: {
+    startLocalMinutes: number;
+    endLocalMinutes: number;
+  };
+}
+
+export type WeatherReinvestEntryPolicy = "high_day_ahead" | "low_midday" | "inverse_low_late";
+
+export interface WeatherReinvestEntryWindowAssessment extends WeatherEntryWindowAssessment {
+  policy: WeatherReinvestEntryPolicy;
 }
 
 export interface WeatherReinvestStateSummary {
@@ -543,27 +567,84 @@ function groupKeyFromRow(row: WeatherEdgeRow): string {
   return `${row.city.toLowerCase()}|${row.date}`;
 }
 
-function entryWindowFromRow(
-  row: WeatherEdgeRow,
+export function requireReinvestEntryWindows(
   options: Pick<
     WeatherReinvestOptions,
     | "highEntryStartLocalMinutes"
     | "highEntryEndLocalMinutes"
     | "lowEntryStartLocalMinutes"
     | "lowEntryEndLocalMinutes"
-    | "now"
-  >
-): WeatherEntryWindowAssessment {
-  return assessWeatherEntryWindow({
-    targetDate: row.date,
-    measure: row.measure,
-    timezone: row.tradingWindow?.timezone,
-    now: options.now,
-    highEntryStartMinutes: options.highEntryStartLocalMinutes,
-    highEntryEndMinutes: options.highEntryEndLocalMinutes,
-    lowEntryStartMinutes: options.lowEntryStartLocalMinutes,
-    lowEntryEndMinutes: options.lowEntryEndLocalMinutes
+    | "inverseLowEntryStartLocalMinutes"
+    | "inverseLowEntryEndLocalMinutes"
+  >,
+  strategy: WeatherTradingStrategy
+): WeatherReinvestEntryWindows {
+  const high = {
+    startLocalMinutes: options.highEntryStartLocalMinutes ?? DEFAULT_HIGH_ENTRY_START_MINUTES,
+    endLocalMinutes: options.highEntryEndLocalMinutes ?? DEFAULT_HIGH_ENTRY_END_MINUTES
+  };
+  const low = {
+    startLocalMinutes: options.lowEntryStartLocalMinutes ?? DEFAULT_LOW_ENTRY_START_MINUTES,
+    endLocalMinutes: options.lowEntryEndLocalMinutes ?? DEFAULT_LOW_ENTRY_END_MINUTES
+  };
+  assertWeatherEntryWindowMinutes("temperature_high", high.startLocalMinutes, high.endLocalMinutes);
+  assertWeatherEntryWindowMinutes("temperature_low", low.startLocalMinutes, low.endLocalMinutes);
+
+  const hasInverseLowStart = options.inverseLowEntryStartLocalMinutes !== undefined;
+  const hasInverseLowEnd = options.inverseLowEntryEndLocalMinutes !== undefined;
+  const marketInformed = strategy === "market_informed_inverse" || strategy === "market_informed_hybrid";
+  if (!marketInformed && (hasInverseLowStart || hasInverseLowEnd)) {
+    throw new Error("Inverse-low entry-window parameters are only valid with a market-informed strategy.");
+  }
+  if (marketInformed && (!hasInverseLowStart || !hasInverseLowEnd)) {
+    throw new Error("Market-informed strategies require explicit inverse-low entry start and end times.");
+  }
+  if (!marketInformed) return { high, low };
+
+  const inverseLow = {
+    startLocalMinutes: options.inverseLowEntryStartLocalMinutes as number,
+    endLocalMinutes: options.inverseLowEntryEndLocalMinutes as number
+  };
+  assertWeatherEntryWindowMinutes("inverse_low", inverseLow.startLocalMinutes, inverseLow.endLocalMinutes);
+  return { high, low, inverseLow };
+}
+
+export function weatherReinvestEntryWindow(input: {
+  date: string;
+  measure: WeatherEdgeRow["measure"];
+  strategy: WeatherEdgeRow["strategy"];
+  strategyLane?: WeatherEdgeRow["strategyLane"];
+  timezone?: string;
+  now?: Date;
+  entryWindows: WeatherReinvestEntryWindows;
+}): WeatherReinvestEntryWindowAssessment {
+  const inverseLow = input.measure === "temperature_low" && (
+    input.strategy === "market_informed_inverse" || input.strategyLane === "inverse_disagreement"
+  );
+  const policy: WeatherReinvestEntryPolicy = inverseLow
+    ? "inverse_low_late"
+    : input.measure === "temperature_low"
+      ? "low_midday"
+      : "high_day_ahead";
+  const selected = inverseLow
+    ? input.entryWindows.inverseLow
+    : input.measure === "temperature_low"
+      ? input.entryWindows.low
+      : input.entryWindows.high;
+  if (!selected) {
+    throw new Error("Inverse low-temperature signal is missing its explicit late entry window.");
+  }
+  const assessment = assessWeatherEntryWindow({
+    targetDate: input.date,
+    measure: input.measure,
+    timezone: input.timezone,
+    now: input.now,
+    highEntryStartMinutes: selected.startLocalMinutes,
+    highEntryEndMinutes: selected.endLocalMinutes,
+    lowEntryStartMinutes: selected.startLocalMinutes,
+    lowEntryEndMinutes: selected.endLocalMinutes
   });
+  return { ...assessment, policy };
 }
 
 function currentGroupExposure(positions: VistadexPosition[]): Map<string, number> {
@@ -984,15 +1065,13 @@ async function buyPositiveWeatherEdges(
     | "minConfidence"
     | "buyMinExecutableEdge"
     | "buyQuoteDriftUsd"
-    | "highEntryStartLocalMinutes"
-    | "highEntryEndLocalMinutes"
-    | "lowEntryStartLocalMinutes"
-    | "lowEntryEndLocalMinutes"
     | "vistadexQuoteTimeoutMs"
     | "vistadexFillerTimeoutMs"
     | "vistadexMaxAttempts"
     | "vistadexRetryBackoffMs"
-  >> & Pick<WeatherReinvestOptions, "maxPerTradeUsd" | "now" | "hybridNormalBuyBudgetFraction">
+  >> & Pick<WeatherReinvestOptions, "maxPerTradeUsd" | "now" | "hybridNormalBuyBudgetFraction"> & {
+    entryWindows: WeatherReinvestEntryWindows;
+  }
 ): Promise<{
   bought: WeatherReinvestTradeResult[];
   skipped: WeatherReinvestTradeResult[];
@@ -1023,7 +1102,15 @@ async function buyPositiveWeatherEdges(
     const fairPrice = row.bestSide === "YES" ? row.fairYes : row.fairNo;
     const edge = row.bestEdge ?? 0;
     const groupKey = groupKeyFromRow(row);
-    const entryWindow = entryWindowFromRow(row, options);
+    const entryWindow = weatherReinvestEntryWindow({
+      date: row.date,
+      measure: row.measure,
+      strategy: row.strategy,
+      strategyLane: row.strategyLane,
+      timezone: row.tradingWindow?.timezone,
+      now: options.now,
+      entryWindows: options.entryWindows
+    });
     const groupCapUsd = bankrollUsd * options.maxGroupFraction;
     const groupUsedUsd = exposure.get(groupKey) ?? 0;
     const groupCapacityUsd = Math.max(0, groupCapUsd - groupUsedUsd);
@@ -1213,6 +1300,9 @@ async function buyPositiveWeatherEdges(
           metadata: {
             weatherStrategy: row.strategy,
             weatherStrategyLane: row.strategyLane,
+            weatherEntryPolicy: entryWindow.policy,
+            weatherEntryLocalDate: entryWindow.localDate,
+            weatherEntryLocalTime: entryWindow.localTime,
             weatherMarketSlug: row.marketSlug,
             weatherGroupKey: groupKey,
             originalBestSide: row.originalBestSide,
@@ -1297,12 +1387,7 @@ export async function runWeatherReinvestment(
     vistadexMaxAttempts: vistadexExecution.maxAttempts,
     vistadexRetryBackoffMs: vistadexExecution.retryBackoffMs
   };
-  const highEntryStartLocalMinutes = options.highEntryStartLocalMinutes ?? DEFAULT_HIGH_ENTRY_START_MINUTES;
-  const highEntryEndLocalMinutes = options.highEntryEndLocalMinutes ?? DEFAULT_HIGH_ENTRY_END_MINUTES;
-  const lowEntryStartLocalMinutes = options.lowEntryStartLocalMinutes ?? DEFAULT_LOW_ENTRY_START_MINUTES;
-  const lowEntryEndLocalMinutes = options.lowEntryEndLocalMinutes ?? DEFAULT_LOW_ENTRY_END_MINUTES;
-  assertWeatherEntryWindowMinutes("temperature_high", highEntryStartLocalMinutes, highEntryEndLocalMinutes);
-  assertWeatherEntryWindowMinutes("temperature_low", lowEntryStartLocalMinutes, lowEntryEndLocalMinutes);
+  const entryWindows = requireReinvestEntryWindows(options, pricingStrategy.strategy);
   const buyOptions = {
     execute,
     maxPerTradeUsd: options.maxPerTradeUsd,
@@ -1313,10 +1398,7 @@ export async function runWeatherReinvestment(
     minConfidence: (options.minConfidence ?? "MEDIUM") as WeatherReinvestConfidence,
     buyMinExecutableEdge: options.buyMinExecutableEdge ?? 0.03,
     buyQuoteDriftUsd: options.buyQuoteDriftUsd ?? 0.02,
-    highEntryStartLocalMinutes,
-    highEntryEndLocalMinutes,
-    lowEntryStartLocalMinutes,
-    lowEntryEndLocalMinutes,
+    entryWindows,
     vistadexQuoteTimeoutMs: vistadexExecution.quoteTimeoutMs,
     vistadexFillerTimeoutMs: vistadexExecution.fillerTimeoutMs,
     vistadexMaxAttempts: vistadexExecution.maxAttempts,
@@ -1469,6 +1551,7 @@ export async function runWeatherReinvestment(
     buyLaneBudgetsUsd: buyResult.laneBudgetsUsd,
     buyLaneSpendUsd: buyResult.laneSpendUsd,
     targetDate: edgeReport?.targetDate ?? targetDate,
+    entryWindows,
     vistadexExecution,
     weatherEdge: edgeReport
       ? {

@@ -48,6 +48,8 @@ jobs:
       WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME: ${{ vars.WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME || '23:30' }}
       WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME: ${{ vars.WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME || '11:00' }}
       WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME: ${{ vars.WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME || '14:30' }}
+      WEATHEREDGE_INVERSE_LOW_ENTRY_START_LOCAL_TIME: ${{ vars.WEATHEREDGE_INVERSE_LOW_ENTRY_START_LOCAL_TIME }}
+      WEATHEREDGE_INVERSE_LOW_ENTRY_END_LOCAL_TIME: ${{ vars.WEATHEREDGE_INVERSE_LOW_ENTRY_END_LOCAL_TIME }}
       WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS: ${{ vars.WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS || '12' }}
       WEATHEREDGE_VISTADEX_QUOTE_TIMEOUT_MS: ${{ vars.WEATHEREDGE_VISTADEX_QUOTE_TIMEOUT_MS || '90000' }}
       WEATHEREDGE_VISTADEX_FILLER_TIMEOUT_MS: ${{ vars.WEATHEREDGE_VISTADEX_FILLER_TIMEOUT_MS || '120000' }}
@@ -161,11 +163,11 @@ jobs:
           ARGS="--days-ahead 1 --strategy ${WEATHEREDGE_STRATEGY} --max-buys ${WEATHEREDGE_MAX_BUYS} --max-group-fraction ${WEATHEREDGE_MAX_GROUP_FRACTION} --max-buy-spend-fraction ${WEATHEREDGE_MAX_BUY_SPEND_FRACTION} --kelly-multiplier ${WEATHEREDGE_KELLY_MULTIPLIER} --max-kelly-fraction ${WEATHEREDGE_MAX_KELLY_FRACTION} --min-edge ${WEATHEREDGE_MIN_EDGE} --min-confidence ${WEATHEREDGE_MIN_CONFIDENCE} --min-cash-to-reinvest ${WEATHEREDGE_MIN_CASH_TO_REINVEST} --target-cash-reserve ${WEATHEREDGE_TARGET_CASH_RESERVE} --high-entry-start-local-time ${WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME} --high-entry-end-local-time ${WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME} --low-entry-start-local-time ${WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME} --low-entry-end-local-time ${WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME} --max-model-run-age-hours ${WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS} --vistadex-quote-timeout-ms ${WEATHEREDGE_VISTADEX_QUOTE_TIMEOUT_MS} --vistadex-filler-timeout-ms ${WEATHEREDGE_VISTADEX_FILLER_TIMEOUT_MS} --vistadex-max-attempts ${WEATHEREDGE_VISTADEX_MAX_ATTEMPTS} --vistadex-retry-backoff-ms ${WEATHEREDGE_VISTADEX_RETRY_BACKOFF_MS} --report-path data/trades/weatheredge-report.json"
 
           if [ "${WEATHEREDGE_STRATEGY}" = "market-informed-inverse" ] || [ "${WEATHEREDGE_STRATEGY}" = "market_informed_inverse" ] || [ "${WEATHEREDGE_STRATEGY}" = "market-informed-hybrid" ] || [ "${WEATHEREDGE_STRATEGY}" = "market_informed_hybrid" ]; then
-            if [ -z "${WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT}" ] || [ -z "${WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY}" ]; then
-              echo "Market-informed strategies require explicit market-anchor coefficient and opposite-probability variables."
+            if [ -z "${WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT}" ] || [ -z "${WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY}" ] || [ -z "${WEATHEREDGE_INVERSE_LOW_ENTRY_START_LOCAL_TIME}" ] || [ -z "${WEATHEREDGE_INVERSE_LOW_ENTRY_END_LOCAL_TIME}" ]; then
+              echo "Market-informed strategies require explicit market-anchor and inverse-low entry-window variables."
               exit 1
             fi
-            ARGS="${ARGS} --market-anchor-coefficient ${WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT} --market-anchor-min-opposite-probability ${WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY}"
+            ARGS="${ARGS} --market-anchor-coefficient ${WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT} --market-anchor-min-opposite-probability ${WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY} --inverse-low-entry-start-local-time ${WEATHEREDGE_INVERSE_LOW_ENTRY_START_LOCAL_TIME} --inverse-low-entry-end-local-time ${WEATHEREDGE_INVERSE_LOW_ENTRY_END_LOCAL_TIME}"
           fi
 
           if [ "${WEATHEREDGE_STRATEGY}" = "market-informed-hybrid" ] || [ "${WEATHEREDGE_STRATEGY}" = "market_informed_hybrid" ]; then

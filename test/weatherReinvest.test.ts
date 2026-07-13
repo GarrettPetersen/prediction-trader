@@ -2,9 +2,11 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   isRetryableVistadexExecutionError,
+  requireReinvestEntryWindows,
   requireReinvestPricingStrategy,
   vistadexExecutionRetryDelayMs,
   weatherHybridLaneBudgets,
+  weatherReinvestEntryWindow,
   weatherReinvestExecutionFailures
 } from "../src/weatherReinvest.js";
 
@@ -79,6 +81,79 @@ describe("WeatherEdge Vistadex execution retry helpers", () => {
       inverseDisagreement: 20
     });
     assert.throws(() => weatherHybridLaneBudgets(30, 1.1), /between 0 and 1/);
+  });
+
+  it("requires a separate inverse-low window for market-informed strategies", () => {
+    assert.throws(
+      () => requireReinvestEntryWindows({}, "market_informed_hybrid"),
+      /explicit inverse-low entry start and end times/
+    );
+    assert.deepEqual(requireReinvestEntryWindows({
+      inverseLowEntryStartLocalMinutes: 20 * 60,
+      inverseLowEntryEndLocalMinutes: 23 * 60 + 30
+    }, "market_informed_hybrid"), {
+      high: { startLocalMinutes: 20 * 60, endLocalMinutes: 23 * 60 + 30 },
+      low: { startLocalMinutes: 11 * 60, endLocalMinutes: 14 * 60 + 30 },
+      inverseLow: { startLocalMinutes: 20 * 60, endLocalMinutes: 23 * 60 + 30 }
+    });
+  });
+
+  it("routes inverse lows to late evening while normal lows stay midday", () => {
+    const entryWindows = requireReinvestEntryWindows({
+      inverseLowEntryStartLocalMinutes: 20 * 60,
+      inverseLowEntryEndLocalMinutes: 23 * 60 + 30
+    }, "market_informed_hybrid");
+    const inverseLate = weatherReinvestEntryWindow({
+      date: "2026-07-14",
+      measure: "temperature_low",
+      strategy: "market_informed_hybrid",
+      strategyLane: "inverse_disagreement",
+      timezone: "Europe/London",
+      now: new Date("2026-07-13T21:15:00.000Z"),
+      entryWindows
+    });
+    const normalLate = weatherReinvestEntryWindow({
+      date: "2026-07-14",
+      measure: "temperature_low",
+      strategy: "forecast_edge",
+      timezone: "Europe/London",
+      now: new Date("2026-07-13T21:15:00.000Z"),
+      entryWindows
+    });
+    const normalMidday = weatherReinvestEntryWindow({
+      date: "2026-07-14",
+      measure: "temperature_low",
+      strategy: "forecast_edge",
+      timezone: "Europe/London",
+      now: new Date("2026-07-13T11:15:00.000Z"),
+      entryWindows
+    });
+
+    assert.equal(inverseLate.policy, "inverse_low_late");
+    assert.equal(inverseLate.shouldEnter, true);
+    assert.equal(normalLate.policy, "low_midday");
+    assert.equal(normalLate.status, "after_entry_window");
+    assert.equal(normalMidday.shouldEnter, true);
+  });
+
+  it("still blocks inverse lows once the target day starts", () => {
+    const entryWindows = requireReinvestEntryWindows({
+      inverseLowEntryStartLocalMinutes: 20 * 60,
+      inverseLowEntryEndLocalMinutes: 23 * 60 + 30
+    }, "market_informed_hybrid");
+    const assessment = weatherReinvestEntryWindow({
+      date: "2026-07-14",
+      measure: "temperature_low",
+      strategy: "market_informed_hybrid",
+      strategyLane: "inverse_disagreement",
+      timezone: "Europe/London",
+      now: new Date("2026-07-14T00:15:00.000Z"),
+      entryWindows
+    });
+
+    assert.equal(assessment.policy, "inverse_low_late");
+    assert.equal(assessment.shouldEnter, false);
+    assert.equal(assessment.status, "market_day_started");
   });
 
   it("retries transient Vistadex filler and transport failures", () => {

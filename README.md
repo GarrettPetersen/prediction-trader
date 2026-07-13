@@ -530,6 +530,8 @@ npm run weather:reinvest -- \
   --high-entry-end-local-time 23:30 \
   --low-entry-start-local-time 11:00 \
   --low-entry-end-local-time 14:30 \
+  --inverse-low-entry-start-local-time 20:00 \
+  --inverse-low-entry-end-local-time 23:30 \
   --max-model-run-age-hours 12 \
   --report-path data/trades/weatheredge-report.json
 ```
@@ -540,9 +542,12 @@ still favorable, refreshes tomorrow's station-aligned weather edges, and buys
 positive-edge Vistadex weather positions with city/date portfolio sizing only
 inside each market's station-local day-ahead entry window. By default high
 temperature markets enter `20:00-23:30` on the local calendar day before the
-target date, while low temperature markets enter `11:00-14:30` on the previous
-day. Cash freed outside the matching window is held until a later scheduled
-run. The loop then checks source freshness before scanning markets: fresh buys
+target date. Normal forecast-based low-temperature signals use `11:00-14:30`,
+while inverse low-temperature signals use their separate `20:00-23:30` window
+to capture late market information without letting the normal forecast model
+trade in its historically adverse window. Cash freed outside the matching
+window is held until a later scheduled run. The loop then checks source
+freshness before scanning markets: fresh buys
 require a common usable Open-Meteo GFS/ECMWF/UKMO model cycle, and the report
 records the exact model initialization and usability timestamps under
 `forecastFreshness`. The loop does not touch Polymarket. Add `--execute` only
@@ -635,6 +640,8 @@ WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME=20:00
 WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME=23:30
 WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME=11:00
 WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME=14:30
+WEATHEREDGE_INVERSE_LOW_ENTRY_START_LOCAL_TIME=20:00
+WEATHEREDGE_INVERSE_LOW_ENTRY_END_LOCAL_TIME=23:30
 WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS=12
 WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS=
 WEATHEREDGE_CITY_BIAS_PRIOR_WEIGHT=
@@ -648,15 +655,16 @@ intentionally required rather than defaulted. Missing live strategy or risk
 configuration fails the scheduled run instead of quietly changing behavior.
 For market-informed strategies, the coefficient and minimum opposite-market
 probability are required too. The hybrid additionally requires an explicit
-normal-lane market-probability threshold. It routes each market into exactly one
-lane:
+normal-lane market-probability threshold. Market-informed strategies also
+require an explicit inverse-low entry window rather than silently borrowing a
+normal-model timing policy. The hybrid routes each market into exactly one lane:
 
 - `normal_agreement`: calibrated high-temperature range `NO` signals where the
   model-selected side is already priced at `0.50` or above.
 - `inverse_disagreement`: apparent forecast edges of at least `0.30` where the
   opposite side is already priced at `0.50` or above. Coefficient `-0.25`
   treats that disagreement as a weak smart-money signal.
-- `abstain`: exact-temperature `NO`, low-temperature, cheap model-side
+- `abstain`: exact-temperature `NO` in the normal lane, cheap model-side
   longshots, weak edges, and any market that satisfies neither lane.
 
 The lanes share cash, held-condition checks, and city/station/day exposure
@@ -694,9 +702,13 @@ from British Columbia rather than UTC. Candidate buys are still gated by the
 resolution station's own timezone: every three-hour run may sell locked
 positions, but it opens fresh high-temperature positions only inside
 `WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME` through
-`WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME`, and fresh low-temperature positions
-only inside `WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME` through
-`WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME`, on the day before the target date. It
+`WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME`; normal low-temperature positions only
+inside `WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME` through
+`WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME`; and inverse low-temperature positions
+only inside `WEATHEREDGE_INVERSE_LOW_ENTRY_START_LOCAL_TIME` through
+`WEATHEREDGE_INVERSE_LOW_ENTRY_END_LOCAL_TIME`, on the day before the target
+date. Reports label each decision with `high_day_ahead`, `low_midday`, or
+`inverse_low_late`. It
 also blocks buys until Open-Meteo metadata shows GFS, ECMWF, and UKMO on one
 usable common model cycle, and it refuses to buy if that cycle is older than
 `WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS`. This means some three-hour ticks are
