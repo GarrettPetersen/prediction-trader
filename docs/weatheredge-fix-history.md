@@ -15,6 +15,7 @@ use with `--since` in ledger commands.
 | Fail-fast bug fix | `e62c4d2` | 2026-07-07 10:47:04 | `2026-07-07T17:47:04Z` | Live reinvestment must fail rather than trade with uncalibrated heuristic pricing. This is the first reasonable cutoff for post-bug-fix audits. |
 | Timing/freshness fix | `f6acde4` | 2026-07-08 20:59:15 | `2026-07-09T03:59:15Z` | Buys are gated on forecast source freshness and a common model run. This is the cutoff for post-timing-fix audits. |
 | Small-size risk cap | `38f192d` | 2026-07-08 23:08:43 | `2026-07-09T06:08:43Z` | Scheduled buys are capped at `$1` per trade and `5%` of bankroll per run by default. Use this cutoff to evaluate the current low-risk live posture. |
+| Inverse-low lane timing | `8181d60` | 2026-07-13 13:17:06 | `2026-07-13T20:17:06Z` | Normal low-temperature signals retain the midday window, while inverse-disagreement lows use an explicit `20:00-23:30` station-local window. Reports and ledger metadata identify the selected policy. |
 
 ## Detailed Timeline
 
@@ -72,6 +73,18 @@ use with `--since` in ledger commands.
   current live-risk cutoff. Trades before this can be directionally useful for
   model audit, but they overstate the loss rate of the current bankroll policy.
 
+### Lane-specific inverse-low timing
+
+- `8181d60` activated at `2026-07-13T20:17:06Z`: stopped applying the normal
+  low-temperature midday timing rule to inverse-disagreement signals. Normal
+  lows remain eligible only from `11:00-14:30` station local time; inverse lows
+  are eligible only from `20:00-23:30` on the prior local day and remain blocked
+  after the target day begins.
+- Market-informed runs now require explicit inverse-low start and end settings.
+  Missing configuration fails before any account or market request. Reports use
+  `inverse_low_late`, and executed ledger records preserve that policy and the
+  station-local entry time.
+
 ## Known Polluted Cohorts
 
 - Before `2026-07-07T17:47:04Z`: polluted by the fallback/calibration bug. Do
@@ -84,6 +97,9 @@ use with `--since` in ledger commands.
   is present, but the old larger sizing is still active.
 - After `2026-07-09T06:08:43Z`: current low-risk regime. This is the cleanest
   live audit period once enough trades accumulate.
+- After `2026-07-13T20:17:06Z`: lane-specific timing is active. Use this cutoff
+  to judge late inverse-low entries; earlier low-temperature trades used a
+  different timing policy and must not be mixed into the cohort.
 
 ## Re-Audit Commands
 
@@ -122,6 +138,16 @@ npm run ledger:pnl -- \
   --venue vistadex \
   --category weather \
   --since 2026-07-09T06:08:43.000Z \
+  --mark bid \
+  --top 20
+```
+
+Audit the lane-specific timing regime:
+
+```bash
+npm run weather:trade-audit -- \
+  --venue vistadex \
+  --since 2026-07-13T20:17:06.000Z \
   --mark bid \
   --top 20
 ```
