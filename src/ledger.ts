@@ -58,6 +58,7 @@ export interface LedgerRecord {
   ticket?: LedgerTicket;
   preview?: TradePreview;
   execution?: TradeExecution;
+  metadata?: Record<string, unknown>;
   raw?: unknown;
   notes?: string[];
 }
@@ -88,6 +89,7 @@ export interface ExecutionLedgerInput {
   preview: TradePreview;
   execution: TradeExecution;
   action?: LedgerAction;
+  metadata?: Record<string, unknown>;
   recordedAt?: string;
 }
 
@@ -228,7 +230,8 @@ export function buildExecutionLedgerRecord(input: ExecutionLedgerInput): LedgerR
     ids,
     ticket: input.ticket,
     preview: input.preview,
-    execution: input.execution
+    execution: input.execution,
+    metadata: input.metadata
   };
 }
 

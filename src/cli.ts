@@ -397,6 +397,7 @@ function compactLedgerRecord(record: LedgerRecord) {
     summary: record.summary,
     market: record.market,
     ids: record.ids,
+    metadata: record.metadata,
     notes: record.notes
   };
 }
@@ -680,6 +681,7 @@ function compactWeatherSignal(signal: WeatherOutcomePricing) {
     tokenId: signal.tokenId,
     price: signal.price,
     strategy: signal.strategy,
+    strategyLane: signal.strategyLane,
     originalBestSide: signal.originalBestSide,
     originalEdge: signal.originalEdge,
     originalFair: signal.originalFair,
@@ -711,6 +713,8 @@ function compactWeatherEdgeRow(row: WeatherEdgeRow) {
     noAsk: round(row.noAsk),
     noEdge: round(row.noEdge),
     confidence: row.confidence,
+    strategy: row.strategy,
+    strategyLane: row.strategyLane,
     suggestedSizeUsd: round(row.suggestedSizeUsd, 2),
     kellyFraction: round(row.kellyFraction),
     liquidity: round(row.liquidity, 2),
@@ -740,7 +744,8 @@ function compactWeatherEdgeRow(row: WeatherEdgeRow) {
       }
       : undefined,
     tokenId: row.tokenId,
-    price: round(row.price)
+    price: round(row.price),
+    reason: row.reason
   };
 }
 
@@ -1339,7 +1344,10 @@ function weatherTradingStrategyArg(args: Args): WeatherTradingStrategy | undefin
   if (value === "market-informed-inverse" || value === "market_informed_inverse") {
     return "market_informed_inverse";
   }
-  throw new Error("--strategy must be forecast-edge or market-informed-inverse.");
+  if (value === "market-informed-hybrid" || value === "market_informed_hybrid") {
+    return "market_informed_hybrid";
+  }
+  throw new Error("--strategy must be forecast-edge, market-informed-inverse, or market-informed-hybrid.");
 }
 
 function previousRunSourcesArg(args: Args): OpenMeteoPreviousRunSourceId[] | undefined {
@@ -1429,7 +1437,7 @@ Commands:
   weather:backtest:inverse-grid --start-date YYYY-MM-DD --end-date YYYY-MM-DD --holdout-start-date YYYY-MM-DD [--bankroll N] [--min-edge N] [--min-trade-price N] [--kelly-multiplier N] [--max-kelly-fraction N] [--max-per-trade N] [--max-portfolio-fraction N] [--max-group-fraction N] [--fill-slippage N] [--min-executable-edge N] [--top N]
   weather:backtest:replay --start ISO [--end ISO | --days N] [--bankroll N] [--min-edge N] [--min-trade-price N] [--max-per-trade N] [--max-buy-spend-fraction N] [--max-group-fraction N] [--target-cash-reserve N] [--sell-threshold N] [--settlement-lag-hours N] [--kelly-multiplier N] [--max-kelly-fraction N] [--portfolio-step-usd N] [--sources openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo] [--max-staleness-hours N] [--price-history-path PATH] [--fetch-price-history] [--strict] [--high-entry-start-local-time HH:MM] [--high-entry-end-local-time HH:MM] [--low-entry-start-local-time HH:MM] [--low-entry-end-local-time HH:MM] [--cron-interval-hours N] [--cron-hour-offset N] [--cron-minute N]
   weather:resolution-audit [--date YYYY-MM-DD | --days-ahead N] [--status active|closed] [--distance-ok-km N] [--distance-warn-km N] [--top N]
-  weather:reinvest [--execute] [--pause-buys] --strategy forecast-edge|market-informed-inverse [--market-anchor-coefficient N] [--market-anchor-min-opposite-probability N] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--max-buy-spend-usd N] [--max-buy-spend-fraction N] [--min-edge N] [--min-cash-to-reinvest N] [--target-cash-reserve N] [--min-confidence low|medium|high] [--require-recent-audit-positive] [--audit-lookback-hours N] [--audit-min-positions N] [--no-calibration] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--high-entry-start-local-time HH:MM] [--high-entry-end-local-time HH:MM] [--low-entry-start-local-time HH:MM] [--low-entry-end-local-time HH:MM] [--max-model-run-age-hours N] [--vistadex-quote-timeout-ms N] [--vistadex-filler-timeout-ms N] [--vistadex-max-attempts N] [--vistadex-retry-backoff-ms N] [--report-path PATH]
+  weather:reinvest [--execute] [--pause-buys] --strategy forecast-edge|market-informed-inverse|market-informed-hybrid [--market-anchor-coefficient N] [--market-anchor-min-opposite-probability N] [--hybrid-normal-min-market-probability N] [--hybrid-normal-buy-budget-fraction N] [--date YYYY-MM-DD | --days-ahead N] [--bankroll N] [--max-per-trade N] [--max-buys N] [--max-group-fraction N] [--max-buy-spend-usd N] [--max-buy-spend-fraction N] [--min-edge N] [--min-cash-to-reinvest N] [--target-cash-reserve N] [--min-confidence low|medium|high] [--require-recent-audit-positive] [--audit-lookback-hours N] [--audit-min-positions N] [--no-calibration] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--high-entry-start-local-time HH:MM] [--high-entry-end-local-time HH:MM] [--low-entry-start-local-time HH:MM] [--low-entry-end-local-time HH:MM] [--max-model-run-age-hours N] [--vistadex-quote-timeout-ms N] [--vistadex-filler-timeout-ms N] [--vistadex-max-attempts N] [--vistadex-retry-backoff-ms N] [--report-path PATH]
   weather:run [--cycles N] [--interval-sec N] [--paper] [--limit N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N]
   weather:dataset:observations (--city CITY [--country CODE] | --latitude N --longitude N) --start-date YYYY-MM-DD --end-date YYYY-MM-DD [--ncei-station ID | --ncei-location ID] [--path PATH]
   weather:dataset:markets [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--closed] [--descending] [--path PATH]
@@ -2102,6 +2110,8 @@ async function run(): Promise<void> {
       strategy: weatherTradingStrategyArg(args),
       marketAnchorCoefficient: numberArg(args, "market-anchor-coefficient", false),
       marketAnchorMinOppositeMarketProbability: numberArg(args, "market-anchor-min-opposite-probability", false),
+      hybridNormalMinMarketProbability: numberArg(args, "hybrid-normal-min-market-probability", false),
+      hybridNormalBuyBudgetFraction: numberArg(args, "hybrid-normal-buy-budget-fraction", false),
       maxPerTradeUsd: numberArg(args, "max-per-trade", false) ?? numberArg(args, "max-usd", false),
       kellyMultiplier: numberArg(args, "kelly-multiplier", false),
       maxKellyFraction: numberArg(args, "max-kelly-fraction", false),

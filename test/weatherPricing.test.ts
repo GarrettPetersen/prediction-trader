@@ -257,6 +257,22 @@ describe("weather pricing math", () => {
       assert.equal(inverse.outcomes[0].oppositeMarketProbability, 0.8);
       assert.equal(inverse.outcomes[0].marketAnchorCoefficient, -0.25);
       assert.ok((inverse.outcomes[0].edge ?? 0) >= 0.03);
+
+      const hybrid = await priceWeatherMarketGroup(config, group, {
+        minEdge: 0.3,
+        strategy: "market_informed_hybrid",
+        marketAnchor: {
+          coefficient: -0.25,
+          minOppositeMarketProbability: 0.5,
+          minExecutableEdge: 0.03
+        },
+        hybrid: {
+          normalMinMarketProbability: 0.5
+        }
+      });
+      assert.equal(hybrid.outcomes[0].signal, "BUY_NO");
+      assert.equal(hybrid.outcomes[0].strategy, "market_informed_hybrid");
+      assert.equal(hybrid.outcomes[0].strategyLane, "inverse_disagreement");
     } finally {
       globalThis.fetch = originalFetch;
     }

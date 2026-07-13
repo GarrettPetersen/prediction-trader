@@ -508,9 +508,11 @@ Run the Vistadex WeatherEdge reinvestment loop locally:
 ```bash
 npm run weather:reinvest -- \
   --days-ahead 1 \
-  --strategy market-informed-inverse \
+  --strategy market-informed-hybrid \
   --market-anchor-coefficient -0.25 \
   --market-anchor-min-opposite-probability 0.50 \
+  --hybrid-normal-min-market-probability 0.50 \
+  --hybrid-normal-buy-budget-fraction 0.333333 \
   --max-buys 8 \
   --max-group-fraction 0.25 \
   --max-buy-spend-fraction 0.25 \
@@ -609,9 +611,11 @@ Configure repository variables:
 ```text
 WEATHEREDGE_LIVE=1
 WEATHEREDGE_BANKROLL=
-WEATHEREDGE_STRATEGY=market-informed-inverse
+WEATHEREDGE_STRATEGY=market-informed-hybrid
 WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT=-0.25
 WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY=0.50
+WEATHEREDGE_HYBRID_NORMAL_MIN_MARKET_PROBABILITY=0.50
+WEATHEREDGE_HYBRID_NORMAL_BUY_BUDGET_FRACTION=0.333333
 WEATHEREDGE_MAX_PER_TRADE=
 WEATHEREDGE_MAX_BUYS=8
 WEATHEREDGE_MAX_GROUP_FRACTION=0.25
@@ -642,11 +646,26 @@ NWS_USER_AGENT=prediction-trader/0.1 weatheredge github-actions
 `WEATHEREDGE_MAX_BUY_SPEND_FRACTION`, and `PREDICTION_TRADER_MAX_USD` are
 intentionally required rather than defaulted. Missing live strategy or risk
 configuration fails the scheduled run instead of quietly changing behavior.
-For `market-informed-inverse`, the coefficient and minimum opposite-market
-probability are required too. The current selected rule takes the opposite side
-only when the forecast appears to have at least `0.30` edge and the market
-already assigns that opposite side at least `0.50`; coefficient `-0.25` treats
-the disagreement as a weak smart-money signal rather than fully inverting it.
+For market-informed strategies, the coefficient and minimum opposite-market
+probability are required too. The hybrid additionally requires an explicit
+normal-lane market-probability threshold. It routes each market into exactly one
+lane:
+
+- `normal_agreement`: calibrated high-temperature range `NO` signals where the
+  model-selected side is already priced at `0.50` or above.
+- `inverse_disagreement`: apparent forecast edges of at least `0.30` where the
+  opposite side is already priced at `0.50` or above. Coefficient `-0.25`
+  treats that disagreement as a weak smart-money signal.
+- `abstain`: exact-temperature `NO`, low-temperature, cheap model-side
+  longshots, weak edges, and any market that satisfies neither lane.
+
+The lanes share cash, held-condition checks, and city/station/day exposure
+limits, so they cannot take opposite sides of the same market. Every hybrid
+candidate carries `strategyLane`, and executed buys write the lane plus model
+inputs into ledger metadata for separate attribution. The normal lane receives
+one third of each run's existing account-wide buy budget and the inverse lane
+receives two thirds. Unused lane budget stays in cash rather than leaking into
+the other strategy and obscuring the comparison.
 
 An empty `WEATHEREDGE_MAX_PER_TRADE` removes the strategy-level per-order cap.
 It does not make risk unlimited: fractional Kelly, the 25% account-wide buy
@@ -666,10 +685,9 @@ historical-residual pricing, the run fails or skips buys instead of falling back
 to heuristic pricing.
 
 `WEATHEREDGE_PAUSE_BUYS=true` leaves locked-position sales active but opens no
-new weather positions. The recent-audit gate is disabled for the initial
-market-informed-inverse launch because its lookback contains trades from the
-superseded forecast-edge strategy; re-enable it only after the audit is made
-strategy-aware or that history has aged out.
+new weather positions. The recent-audit gate should remain disabled until it is
+made strategy-lane-aware; otherwise older forecast-edge trades can block the
+hybrid strategy for reasons unrelated to its own performance.
 
 The workflow sets `TZ=America/Vancouver`, so `--days-ahead 1` means tomorrow
 from British Columbia rather than UTC. Candidate buys are still gated by the

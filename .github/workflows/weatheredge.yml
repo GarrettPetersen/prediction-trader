@@ -30,6 +30,8 @@ jobs:
       WEATHEREDGE_STRATEGY: ${{ vars.WEATHEREDGE_STRATEGY }}
       WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT: ${{ vars.WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT }}
       WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY: ${{ vars.WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY }}
+      WEATHEREDGE_HYBRID_NORMAL_MIN_MARKET_PROBABILITY: ${{ vars.WEATHEREDGE_HYBRID_NORMAL_MIN_MARKET_PROBABILITY }}
+      WEATHEREDGE_HYBRID_NORMAL_BUY_BUDGET_FRACTION: ${{ vars.WEATHEREDGE_HYBRID_NORMAL_BUY_BUDGET_FRACTION }}
       WEATHEREDGE_MAX_PER_TRADE: ${{ vars.WEATHEREDGE_MAX_PER_TRADE }}
       WEATHEREDGE_MAX_BUYS: ${{ vars.WEATHEREDGE_MAX_BUYS || '8' }}
       WEATHEREDGE_MAX_GROUP_FRACTION: ${{ vars.WEATHEREDGE_MAX_GROUP_FRACTION || '0.25' }}
@@ -158,12 +160,20 @@ jobs:
 
           ARGS="--days-ahead 1 --strategy ${WEATHEREDGE_STRATEGY} --max-buys ${WEATHEREDGE_MAX_BUYS} --max-group-fraction ${WEATHEREDGE_MAX_GROUP_FRACTION} --max-buy-spend-fraction ${WEATHEREDGE_MAX_BUY_SPEND_FRACTION} --kelly-multiplier ${WEATHEREDGE_KELLY_MULTIPLIER} --max-kelly-fraction ${WEATHEREDGE_MAX_KELLY_FRACTION} --min-edge ${WEATHEREDGE_MIN_EDGE} --min-confidence ${WEATHEREDGE_MIN_CONFIDENCE} --min-cash-to-reinvest ${WEATHEREDGE_MIN_CASH_TO_REINVEST} --target-cash-reserve ${WEATHEREDGE_TARGET_CASH_RESERVE} --high-entry-start-local-time ${WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME} --high-entry-end-local-time ${WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME} --low-entry-start-local-time ${WEATHEREDGE_LOW_ENTRY_START_LOCAL_TIME} --low-entry-end-local-time ${WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME} --max-model-run-age-hours ${WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS} --vistadex-quote-timeout-ms ${WEATHEREDGE_VISTADEX_QUOTE_TIMEOUT_MS} --vistadex-filler-timeout-ms ${WEATHEREDGE_VISTADEX_FILLER_TIMEOUT_MS} --vistadex-max-attempts ${WEATHEREDGE_VISTADEX_MAX_ATTEMPTS} --vistadex-retry-backoff-ms ${WEATHEREDGE_VISTADEX_RETRY_BACKOFF_MS} --report-path data/trades/weatheredge-report.json"
 
-          if [ "${WEATHEREDGE_STRATEGY}" = "market-informed-inverse" ] || [ "${WEATHEREDGE_STRATEGY}" = "market_informed_inverse" ]; then
+          if [ "${WEATHEREDGE_STRATEGY}" = "market-informed-inverse" ] || [ "${WEATHEREDGE_STRATEGY}" = "market_informed_inverse" ] || [ "${WEATHEREDGE_STRATEGY}" = "market-informed-hybrid" ] || [ "${WEATHEREDGE_STRATEGY}" = "market_informed_hybrid" ]; then
             if [ -z "${WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT}" ] || [ -z "${WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY}" ]; then
-              echo "The market-informed inverse strategy requires explicit market-anchor coefficient and opposite-probability variables."
+              echo "Market-informed strategies require explicit market-anchor coefficient and opposite-probability variables."
               exit 1
             fi
             ARGS="${ARGS} --market-anchor-coefficient ${WEATHEREDGE_MARKET_ANCHOR_COEFFICIENT} --market-anchor-min-opposite-probability ${WEATHEREDGE_MARKET_ANCHOR_MIN_OPPOSITE_PROBABILITY}"
+          fi
+
+          if [ "${WEATHEREDGE_STRATEGY}" = "market-informed-hybrid" ] || [ "${WEATHEREDGE_STRATEGY}" = "market_informed_hybrid" ]; then
+            if [ -z "${WEATHEREDGE_HYBRID_NORMAL_MIN_MARKET_PROBABILITY}" ] || [ -z "${WEATHEREDGE_HYBRID_NORMAL_BUY_BUDGET_FRACTION}" ]; then
+              echo "The market-informed hybrid strategy requires explicit normal-lane probability and buy-budget variables."
+              exit 1
+            fi
+            ARGS="${ARGS} --hybrid-normal-min-market-probability ${WEATHEREDGE_HYBRID_NORMAL_MIN_MARKET_PROBABILITY} --hybrid-normal-buy-budget-fraction ${WEATHEREDGE_HYBRID_NORMAL_BUY_BUDGET_FRACTION}"
           fi
 
           if [ -n "${WEATHEREDGE_MAX_PER_TRADE}" ]; then

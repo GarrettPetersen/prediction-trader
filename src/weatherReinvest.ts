@@ -48,6 +48,7 @@ import {
   type WeatherForecastFreshnessAssessment
 } from "./weatherForecastFreshness.js";
 import type {
+  WeatherHybridPricingOptions,
   WeatherMarketAnchorPricingOptions,
   WeatherTradingStrategy
 } from "./weatherPricing.js";
@@ -78,6 +79,8 @@ export interface WeatherReinvestOptions extends Pick<
   strategy?: WeatherTradingStrategy;
   marketAnchorCoefficient?: number;
   marketAnchorMinOppositeMarketProbability?: number;
+  hybridNormalMinMarketProbability?: number;
+  hybridNormalBuyBudgetFraction?: number;
   kellyMultiplier?: number;
   maxKellyFraction?: number;
   maxGroupFraction?: number;
@@ -154,6 +157,7 @@ export interface WeatherReinvestTradeResult {
   consensusMeanC?: number;
   consensusSigmaC?: number;
   strategy?: WeatherEdgeRow["strategy"];
+  strategyLane?: WeatherEdgeRow["strategyLane"];
   originalBestSide?: WeatherEdgeRow["originalBestSide"];
   originalEdge?: number;
   originalFair?: number;
@@ -190,6 +194,8 @@ export interface WeatherReinvestReport {
   targetCashReserveUsd: number;
   deployableCashUsd: number;
   buyCashBudgetUsd: number;
+  buyLaneBudgetsUsd?: WeatherReinvestLaneAmounts;
+  buyLaneSpendUsd?: WeatherReinvestLaneAmounts;
   targetDate: string;
   vistadexExecution: {
     quoteTimeoutMs: number;
@@ -207,6 +213,11 @@ export interface WeatherReinvestReport {
   forecastFreshness?: WeatherForecastFreshnessAssessment;
   auditGate?: WeatherReinvestAuditGate;
   warnings: string[];
+}
+
+export interface WeatherReinvestLaneAmounts {
+  normalAgreement: number;
+  inverseDisagreement: number;
 }
 
 export interface WeatherReinvestStateSummary {
@@ -332,6 +343,27 @@ export function weatherBuyCashBudget(input: {
   return roundUsd(budget);
 }
 
+export function weatherHybridLaneBudgets(
+  buyCashBudgetUsd: number,
+  normalBuyBudgetFraction: number
+): WeatherReinvestLaneAmounts {
+  if (!Number.isFinite(buyCashBudgetUsd) || buyCashBudgetUsd < 0) {
+    throw new Error("Hybrid buy cash budget must be a non-negative number.");
+  }
+  if (
+    !Number.isFinite(normalBuyBudgetFraction) ||
+    normalBuyBudgetFraction < 0 ||
+    normalBuyBudgetFraction > 1
+  ) {
+    throw new Error("Hybrid normal buy budget fraction must be between 0 and 1.");
+  }
+  const normalAgreement = roundUsd(buyCashBudgetUsd * normalBuyBudgetFraction);
+  return {
+    normalAgreement,
+    inverseDisagreement: roundUsd(buyCashBudgetUsd - normalAgreement)
+  };
+}
+
 export function requireReinvestMinEdge(minEdge?: number): number {
   if (minEdge === undefined || !Number.isFinite(minEdge)) {
     throw new Error("weather:reinvest requires --min-edge; do not rely on implicit live-trading edge thresholds.");
@@ -341,10 +373,17 @@ export function requireReinvestMinEdge(minEdge?: number): number {
 
 export function requireReinvestPricingStrategy(options: Pick<
   WeatherReinvestOptions,
-  "strategy" | "marketAnchorCoefficient" | "marketAnchorMinOppositeMarketProbability" | "buyMinExecutableEdge"
+  | "strategy"
+  | "marketAnchorCoefficient"
+  | "marketAnchorMinOppositeMarketProbability"
+  | "hybridNormalMinMarketProbability"
+  | "hybridNormalBuyBudgetFraction"
+  | "buyMinExecutableEdge"
 >): {
   strategy: WeatherTradingStrategy;
   marketAnchor?: WeatherMarketAnchorPricingOptions;
+  hybrid?: WeatherHybridPricingOptions;
+  hybridNormalBuyBudgetFraction?: number;
 } {
   if (options.strategy === undefined) {
     throw new Error("weather:reinvest requires --strategy; do not rely on an implicit live-trading model.");
@@ -352,19 +391,21 @@ export function requireReinvestPricingStrategy(options: Pick<
   if (options.strategy === "forecast_edge") {
     if (
       options.marketAnchorCoefficient !== undefined ||
-      options.marketAnchorMinOppositeMarketProbability !== undefined
+      options.marketAnchorMinOppositeMarketProbability !== undefined ||
+      options.hybridNormalMinMarketProbability !== undefined ||
+      options.hybridNormalBuyBudgetFraction !== undefined
     ) {
-      throw new Error("Market-anchor parameters are only valid with --strategy market-informed-inverse.");
+      throw new Error("Market-router parameters are only valid with a market-informed strategy.");
     }
     return { strategy: options.strategy };
   }
-  if (options.strategy !== "market_informed_inverse") {
+  if (options.strategy !== "market_informed_inverse" && options.strategy !== "market_informed_hybrid") {
     throw new Error(`Unsupported WeatherEdge strategy: ${String(options.strategy)}.`);
   }
   const coefficient = options.marketAnchorCoefficient;
   const minOppositeMarketProbability = options.marketAnchorMinOppositeMarketProbability;
   if (coefficient === undefined || !Number.isFinite(coefficient) || coefficient >= 0) {
-    throw new Error("market-informed-inverse requires --market-anchor-coefficient with a finite negative value.");
+    throw new Error(`${options.strategy} requires --market-anchor-coefficient with a finite negative value.`);
   }
   if (
     minOppositeMarketProbability === undefined ||
@@ -372,10 +413,15 @@ export function requireReinvestPricingStrategy(options: Pick<
     minOppositeMarketProbability < 0 ||
     minOppositeMarketProbability > 1
   ) {
-    throw new Error("market-informed-inverse requires --market-anchor-min-opposite-probability between 0 and 1.");
+    throw new Error(`${options.strategy} requires --market-anchor-min-opposite-probability between 0 and 1.`);
   }
   const minExecutableEdge = options.buyMinExecutableEdge ?? 0.03;
-  return {
+  const result: {
+    strategy: WeatherTradingStrategy;
+    marketAnchor: WeatherMarketAnchorPricingOptions;
+    hybrid?: WeatherHybridPricingOptions;
+    hybridNormalBuyBudgetFraction?: number;
+  } = {
     strategy: options.strategy,
     marketAnchor: {
       coefficient,
@@ -383,6 +429,36 @@ export function requireReinvestPricingStrategy(options: Pick<
       minExecutableEdge
     }
   };
+  if (options.strategy === "market_informed_inverse") {
+    if (
+      options.hybridNormalMinMarketProbability !== undefined ||
+      options.hybridNormalBuyBudgetFraction !== undefined
+    ) {
+      throw new Error("Hybrid routing parameters are only valid with --strategy market-informed-hybrid.");
+    }
+    return result;
+  }
+  const normalMinMarketProbability = options.hybridNormalMinMarketProbability;
+  if (
+    normalMinMarketProbability === undefined ||
+    !Number.isFinite(normalMinMarketProbability) ||
+    normalMinMarketProbability < 0 ||
+    normalMinMarketProbability > 1
+  ) {
+    throw new Error("market-informed-hybrid requires --hybrid-normal-min-market-probability between 0 and 1.");
+  }
+  const normalBuyBudgetFraction = options.hybridNormalBuyBudgetFraction;
+  if (
+    normalBuyBudgetFraction === undefined ||
+    !Number.isFinite(normalBuyBudgetFraction) ||
+    normalBuyBudgetFraction < 0 ||
+    normalBuyBudgetFraction > 1
+  ) {
+    throw new Error("market-informed-hybrid requires --hybrid-normal-buy-budget-fraction between 0 and 1.");
+  }
+  result.hybrid = { normalMinMarketProbability };
+  result.hybridNormalBuyBudgetFraction = normalBuyBudgetFraction;
+  return result;
 }
 
 export function assertReinvestCalibrationEnabled(skipCalibration?: boolean): void {
@@ -646,6 +722,7 @@ async function maybeExecuteVistadexTrade(
     validateQuote?: (quote: VistadexTradeQuote) => void;
     maxAttempts: number;
     retryBackoffMs: number;
+    metadata?: Record<string, unknown>;
   }
 ): Promise<{
   execution?: TradeExecution;
@@ -685,7 +762,8 @@ async function maybeExecuteVistadexTrade(
         ticket,
         preview,
         execution,
-        action: "order"
+        action: "order",
+        metadata: options.metadata
       });
       return { execution, ledger, attempts, quote: activeQuote };
     } catch (error) {
@@ -914,11 +992,13 @@ async function buyPositiveWeatherEdges(
     | "vistadexFillerTimeoutMs"
     | "vistadexMaxAttempts"
     | "vistadexRetryBackoffMs"
-  >> & Pick<WeatherReinvestOptions, "maxPerTradeUsd" | "now">
+  >> & Pick<WeatherReinvestOptions, "maxPerTradeUsd" | "now" | "hybridNormalBuyBudgetFraction">
 ): Promise<{
   bought: WeatherReinvestTradeResult[];
   skipped: WeatherReinvestTradeResult[];
   warnings: string[];
+  laneBudgetsUsd?: WeatherReinvestLaneAmounts;
+  laneSpendUsd?: WeatherReinvestLaneAmounts;
 }> {
   const bought: WeatherReinvestTradeResult[] = [];
   const skipped: WeatherReinvestTradeResult[] = [];
@@ -928,6 +1008,12 @@ async function buyPositiveWeatherEdges(
   const exposure = currentGroupExposure(positions);
   let availableCash = cashUsd;
   let submittedBuyAttempts = 0;
+  const laneBudgetsUsd = options.hybridNormalBuyBudgetFraction === undefined
+    ? undefined
+    : weatherHybridLaneBudgets(cashUsd, options.hybridNormalBuyBudgetFraction);
+  const laneSpendUsd = laneBudgetsUsd
+    ? { normalAgreement: 0, inverseDisagreement: 0 }
+    : undefined;
 
   for (const row of edgeReport.signals) {
     if (bought.length >= options.maxBuys || submittedBuyAttempts >= options.maxBuys) break;
@@ -941,6 +1027,11 @@ async function buyPositiveWeatherEdges(
     const groupCapUsd = bankrollUsd * options.maxGroupFraction;
     const groupUsedUsd = exposure.get(groupKey) ?? 0;
     const groupCapacityUsd = Math.max(0, groupCapUsd - groupUsedUsd);
+    const laneKey = row.strategyLane === "normal_agreement"
+      ? "normalAgreement"
+      : row.strategyLane === "inverse_disagreement"
+        ? "inverseDisagreement"
+        : undefined;
     const base = {
       action: "buy_edge" as const,
       slug: row.marketSlug,
@@ -961,6 +1052,7 @@ async function buyPositiveWeatherEdges(
       consensusMeanC: row.consensusMeanC,
       consensusSigmaC: row.consensusSigmaC,
       strategy: row.strategy,
+      strategyLane: row.strategyLane,
       originalBestSide: row.originalBestSide,
       originalEdge: row.originalEdge,
       originalFair: row.originalFair,
@@ -992,6 +1084,20 @@ async function buyPositiveWeatherEdges(
     }
     if (!confidenceAtLeast(row.confidence, options.minConfidence)) {
       skipped.push({ ...base, status: "skipped", reason: `Confidence ${row.confidence} below minimum ${options.minConfidence}.` });
+      continue;
+    }
+    if (row.strategy === "market_informed_hybrid" && (!laneKey || !laneBudgetsUsd || !laneSpendUsd)) {
+      throw new Error(`Hybrid signal ${row.marketSlug} is missing an executable strategy lane or lane budget.`);
+    }
+    const laneCapacityUsd = laneKey && laneBudgetsUsd && laneSpendUsd
+      ? Math.max(0, laneBudgetsUsd[laneKey] - laneSpendUsd[laneKey])
+      : availableCash;
+    if (laneCapacityUsd < options.minTradeUsd) {
+      skipped.push({
+        ...base,
+        status: "skipped",
+        reason: `${row.strategyLane} buy budget is below the minimum trade size.`
+      });
       continue;
     }
     if ((row.suggestedSizeUsd ?? 0) < options.minTradeUsd) {
@@ -1033,7 +1139,8 @@ async function buyPositiveWeatherEdges(
     const amountLimits = [
       row.suggestedSizeUsd ?? 0,
       availableCash,
-      groupCapacityUsd
+      groupCapacityUsd,
+      laneCapacityUsd
     ];
     if (options.maxPerTradeUsd !== undefined) amountLimits.push(options.maxPerTradeUsd);
     const amountUsd = Math.min(...amountLimits);
@@ -1102,7 +1209,19 @@ async function buyPositiveWeatherEdges(
           refreshQuote: () => createVistadexTradeQuote(config, ticket),
           validateQuote: validateBuyQuote,
           maxAttempts: options.vistadexMaxAttempts,
-          retryBackoffMs: options.vistadexRetryBackoffMs
+          retryBackoffMs: options.vistadexRetryBackoffMs,
+          metadata: {
+            weatherStrategy: row.strategy,
+            weatherStrategyLane: row.strategyLane,
+            weatherMarketSlug: row.marketSlug,
+            weatherGroupKey: groupKey,
+            originalBestSide: row.originalBestSide,
+            originalEdge: row.originalEdge,
+            originalFair: row.originalFair,
+            originalReferencePrice: row.originalReferencePrice,
+            oppositeMarketProbability: row.oppositeMarketProbability,
+            marketAnchorCoefficient: row.marketAnchorCoefficient
+          }
         }
       );
       attempts = executionAttempts;
@@ -1114,6 +1233,9 @@ async function buyPositiveWeatherEdges(
       }
       const spentUsd = fill?.totalUsd ?? finalQuote.totalUsd;
       availableCash -= spentUsd;
+      if (laneKey && laneSpendUsd) {
+        laneSpendUsd[laneKey] = roundUsd(laneSpendUsd[laneKey] + spentUsd);
+      }
       exposure.set(groupKey, (exposure.get(groupKey) ?? 0) + spentUsd);
       heldConditionIds.add(marketRef.conditionId);
       bought.push({
@@ -1141,7 +1263,7 @@ async function buyPositiveWeatherEdges(
     }
   }
 
-  return { bought, skipped, warnings };
+  return { bought, skipped, warnings, laneBudgetsUsd, laneSpendUsd };
 }
 
 export async function runWeatherReinvestment(
@@ -1184,6 +1306,7 @@ export async function runWeatherReinvestment(
   const buyOptions = {
     execute,
     maxPerTradeUsd: options.maxPerTradeUsd,
+    hybridNormalBuyBudgetFraction: pricingStrategy.hybridNormalBuyBudgetFraction,
     maxGroupFraction: options.maxGroupFraction ?? 0.25,
     minTradeUsd: options.minTradeUsd ?? 0.5,
     maxBuys: Math.max(0, Math.trunc(options.maxBuys ?? 8)),
@@ -1277,7 +1400,8 @@ export async function runWeatherReinvestment(
       cityBiasPriorWeight: options.cityBiasPriorWeight,
       sizingStrategy: "city_portfolio",
       strategy: pricingStrategy.strategy,
-      marketAnchor: pricingStrategy.marketAnchor
+      marketAnchor: pricingStrategy.marketAnchor,
+      hybrid: pricingStrategy.hybrid
     });
   const buyResult = edgeReport
     ? await buyPositiveWeatherEdges(
@@ -1291,6 +1415,8 @@ export async function runWeatherReinvestment(
     )
     : {
       bought: [],
+      laneBudgetsUsd: undefined,
+      laneSpendUsd: undefined,
       skipped: [{
         action: "buy_edge" as const,
         status: "skipped" as const,
@@ -1340,6 +1466,8 @@ export async function runWeatherReinvestment(
     targetCashReserveUsd: roundUsd(targetCashReserveUsd),
     deployableCashUsd: roundUsd(deployableWeatherCash(finalState.cashUsd, targetCashReserveUsd)),
     buyCashBudgetUsd: roundUsd(buyCashBudgetUsd),
+    buyLaneBudgetsUsd: buyResult.laneBudgetsUsd,
+    buyLaneSpendUsd: buyResult.laneSpendUsd,
     targetDate: edgeReport?.targetDate ?? targetDate,
     vistadexExecution,
     weatherEdge: edgeReport

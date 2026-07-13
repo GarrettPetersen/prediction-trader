@@ -4,6 +4,7 @@ import {
   isRetryableVistadexExecutionError,
   requireReinvestPricingStrategy,
   vistadexExecutionRetryDelayMs,
+  weatherHybridLaneBudgets,
   weatherReinvestExecutionFailures
 } from "../src/weatherReinvest.js";
 
@@ -32,6 +33,52 @@ describe("WeatherEdge Vistadex execution retry helpers", () => {
         minExecutableEdge: 0.03
       }
     });
+  });
+
+  it("requires explicit routing parameters for the market-informed hybrid", () => {
+    assert.throws(
+      () => requireReinvestPricingStrategy({
+        strategy: "market_informed_hybrid",
+        marketAnchorCoefficient: -0.25,
+        marketAnchorMinOppositeMarketProbability: 0.5
+      }),
+      /hybrid-normal-min-market-probability/
+    );
+    assert.throws(
+      () => requireReinvestPricingStrategy({
+        strategy: "market_informed_hybrid",
+        marketAnchorCoefficient: -0.25,
+        marketAnchorMinOppositeMarketProbability: 0.5,
+        hybridNormalMinMarketProbability: 0.5
+      }),
+      /hybrid-normal-buy-budget-fraction/
+    );
+    assert.deepEqual(requireReinvestPricingStrategy({
+      strategy: "market_informed_hybrid",
+      marketAnchorCoefficient: -0.25,
+      marketAnchorMinOppositeMarketProbability: 0.5,
+      hybridNormalMinMarketProbability: 0.5,
+      hybridNormalBuyBudgetFraction: 1 / 3
+    }), {
+      strategy: "market_informed_hybrid",
+      marketAnchor: {
+        coefficient: -0.25,
+        minOppositeMarketProbability: 0.5,
+        minExecutableEdge: 0.03
+      },
+      hybrid: {
+        normalMinMarketProbability: 0.5
+      },
+      hybridNormalBuyBudgetFraction: 1 / 3
+    });
+  });
+
+  it("reserves independent normal and inverse lane budgets", () => {
+    assert.deepEqual(weatherHybridLaneBudgets(30, 1 / 3), {
+      normalAgreement: 10,
+      inverseDisagreement: 20
+    });
+    assert.throws(() => weatherHybridLaneBudgets(30, 1.1), /between 0 and 1/);
   });
 
   it("retries transient Vistadex filler and transport failures", () => {

@@ -61,6 +61,7 @@ export interface WeatherEdgeRow {
   tokenId?: string;
   price?: number;
   strategy: WeatherOutcomePricing["strategy"];
+  strategyLane?: WeatherOutcomePricing["strategyLane"];
   originalBestSide?: WeatherOutcomePricing["originalBestSide"];
   originalEdge?: number;
   originalFair?: number;
@@ -168,6 +169,7 @@ export function buildWeatherEdgeRows(reports: WeatherPricingReport[]): WeatherEd
           tokenId: outcome.tokenId,
           price: unsafeStartedDay ? undefined : outcome.price,
           strategy: outcome.strategy,
+          strategyLane: outcome.strategyLane,
           originalBestSide: outcome.originalBestSide,
           originalEdge: outcome.originalEdge,
           originalFair: outcome.originalFair,
@@ -237,6 +239,7 @@ function pricingOptions(options: WeatherEdgeReportOptions): WeatherPricingOption
     sizingStrategy: options.sizingStrategy,
     strategy: options.strategy,
     marketAnchor: options.marketAnchor,
+    hybrid: options.hybrid,
     maxGroupFraction: options.maxGroupFraction,
     portfolioStepUsd: options.portfolioStepUsd
   };

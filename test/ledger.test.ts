@@ -71,6 +71,9 @@ describe("trade ledger", () => {
           transactionHash: "0xtx"
         }
       },
+      metadata: {
+        weatherStrategyLane: "normal_agreement"
+      },
       recordedAt: "2026-06-26T00:00:00.000Z"
     });
 
@@ -78,6 +81,7 @@ describe("trade ledger", () => {
 
     assert.equal(record.dedupeKey, "polymarket:order:0xorder");
     assert.equal(record.ids?.orderId, "0xorder");
+    assert.equal(record.metadata?.weatherStrategyLane, "normal_agreement");
     assert.equal(summary.count, 1);
     assert.equal(summary.byVenue.polymarket, 1);
     assert.equal(summary.byAction.order, 1);
