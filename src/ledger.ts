@@ -89,6 +89,7 @@ export interface ExecutionLedgerInput {
   preview: TradePreview;
   execution: TradeExecution;
   action?: LedgerAction;
+  market?: LedgerMarketRef;
   metadata?: Record<string, unknown>;
   recordedAt?: string;
 }
@@ -165,6 +166,42 @@ function marketFromTicket(ticket: LedgerTicket): LedgerMarketRef {
   };
 }
 
+function marketFromExecutionInput(input: ExecutionLedgerInput): LedgerMarketRef {
+  const ticketMarket = marketFromTicket(input.ticket);
+  if (!input.market) return ticketMarket;
+
+  const keys: Array<keyof LedgerMarketRef> = [
+    "conditionId",
+    "marketId",
+    "positionId",
+    "tokenId",
+    "slug",
+    "eventSlug",
+    "question",
+    "outcome",
+    "outcomeIndex"
+  ];
+  for (const key of keys) {
+    const ticketValue = ticketMarket[key];
+    const suppliedValue = input.market[key];
+    if (ticketValue !== undefined && suppliedValue !== undefined && ticketValue !== suppliedValue) {
+      throw new Error(`Execution ledger market ${key} conflicts with the trade ticket.`);
+    }
+  }
+
+  return {
+    conditionId: input.market.conditionId ?? ticketMarket.conditionId,
+    marketId: input.market.marketId ?? ticketMarket.marketId,
+    positionId: input.market.positionId ?? ticketMarket.positionId,
+    tokenId: input.market.tokenId ?? ticketMarket.tokenId,
+    slug: input.market.slug ?? ticketMarket.slug,
+    eventSlug: input.market.eventSlug ?? ticketMarket.eventSlug,
+    question: input.market.question ?? ticketMarket.question,
+    outcome: input.market.outcome ?? ticketMarket.outcome,
+    outcomeIndex: input.market.outcomeIndex ?? ticketMarket.outcomeIndex
+  };
+}
+
 function dedupeKeyFromExecution(input: ExecutionLedgerInput, ids: LedgerIds): string {
   if (input.ticket.venue === "polymarket" && input.action === "redeem") {
     return ids.transactionHash
@@ -226,7 +263,7 @@ export function buildExecutionLedgerRecord(input: ExecutionLedgerInput): LedgerR
     shares,
     notionalUsd: fill.notionalUsd ?? input.preview.notionalUsd,
     summary: input.preview.summary,
-    market: marketFromTicket(input.ticket),
+    market: marketFromExecutionInput(input),
     ids,
     ticket: input.ticket,
     preview: input.preview,

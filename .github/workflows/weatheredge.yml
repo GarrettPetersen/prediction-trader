@@ -91,6 +91,7 @@ jobs:
           path: |
             .cache/weatheredge
             data/weather
+            data/trades/ledger.jsonl
           key: weatheredge-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
             weatheredge-${{ runner.os }}-

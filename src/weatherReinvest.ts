@@ -4,7 +4,8 @@ import type { AppConfig } from "./config.js";
 import {
   appendExecutionLedgerRecord,
   readLedgerRecords,
-  type AppendLedgerResult
+  type AppendLedgerResult,
+  type LedgerMarketRef
 } from "./ledger.js";
 import {
   markFromVistadexPosition
@@ -803,6 +804,7 @@ async function maybeExecuteVistadexTrade(
     validateQuote?: (quote: VistadexTradeQuote) => void;
     maxAttempts: number;
     retryBackoffMs: number;
+    market: LedgerMarketRef;
     metadata?: Record<string, unknown>;
   }
 ): Promise<{
@@ -844,6 +846,7 @@ async function maybeExecuteVistadexTrade(
         preview,
         execution,
         action: "order",
+        market: options.market,
         metadata: options.metadata
       });
       return { execution, ledger, attempts, quote: activeQuote };
@@ -968,7 +971,14 @@ async function sellLockedWeatherPositions(
           refreshQuote: () => createVistadexTradeQuote(config, ticket),
           validateQuote: validateSellQuote,
           maxAttempts: options.vistadexMaxAttempts,
-          retryBackoffMs: options.vistadexRetryBackoffMs
+          retryBackoffMs: options.vistadexRetryBackoffMs,
+          market: {
+            conditionId: position.conditionId,
+            slug: position.slug,
+            question: position.question,
+            outcome: position.outcomes[position.outcomeIndex],
+            outcomeIndex: position.outcomeIndex
+          }
         }
       );
       attempts = executionAttempts;
@@ -1297,6 +1307,14 @@ async function buyPositiveWeatherEdges(
           validateQuote: validateBuyQuote,
           maxAttempts: options.vistadexMaxAttempts,
           retryBackoffMs: options.vistadexRetryBackoffMs,
+          market: {
+            conditionId: marketRef.conditionId,
+            slug: row.marketSlug,
+            eventSlug: row.eventSlug,
+            question: row.question,
+            outcome: row.bestSide === "YES" ? "Yes" : "No",
+            outcomeIndex
+          },
           metadata: {
             weatherStrategy: row.strategy,
             weatherStrategyLane: row.strategyLane,

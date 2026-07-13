@@ -714,9 +714,10 @@ usable common model cycle, and it refuses to buy if that cycle is older than
 `WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS`. This means some three-hour ticks are
 expected no-ops: they may be in the right station-local window but still before
 the slowest upstream model has landed. It restores and saves
-`.cache/weatheredge` and `data/weather` with `actions/cache` so calibration
-datasets and implementation caches survive between runs once seeded. It also
-uploads `data/trades/ledger.jsonl` and
+`.cache/weatheredge`, `data/weather`, and `data/trades/ledger.jsonl` with
+`actions/cache` so calibration datasets, implementation caches, and the
+cumulative execution audit survive between runs once seeded. It also uploads
+`data/trades/ledger.jsonl` and
 `data/trades/weatheredge-report.json` as run artifacts.
 
 The ignored `data/weather/**/*.jsonl` datasets are required for calibrated live

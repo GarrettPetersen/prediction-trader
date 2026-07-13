@@ -118,6 +118,12 @@ describe("trade ledger", () => {
           }
         }
       },
+      market: {
+        slug: "highest-temperature-in-london-on-july-14-2026-17c",
+        eventSlug: "highest-temperature-in-london-on-july-14-2026",
+        question: "Will the highest temperature in London be 17C on July 14?",
+        outcome: "Yes"
+      },
       recordedAt: "2026-07-04T00:00:00.000Z"
     });
 
@@ -125,5 +131,44 @@ describe("trade ledger", () => {
     assert.equal(record.price, 0.9989);
     assert.equal(record.shares, 21.2);
     assert.equal(record.notionalUsd, 21.17668);
+    assert.deepEqual(record.market, {
+      conditionId: "0xcondition",
+      marketId: undefined,
+      positionId: undefined,
+      tokenId: undefined,
+      slug: "highest-temperature-in-london-on-july-14-2026-17c",
+      eventSlug: "highest-temperature-in-london-on-july-14-2026",
+      question: "Will the highest temperature in London be 17C on July 14?",
+      outcome: "Yes",
+      outcomeIndex: 1
+    });
+  });
+
+  it("rejects market references that conflict with the execution ticket", () => {
+    assert.throws(() => buildExecutionLedgerRecord({
+      command: "vistadex:trade",
+      ticket: {
+        venue: "vistadex",
+        side: "buy",
+        conditionId: "0xcondition",
+        outcomeIndex: 0,
+        amountUsd: 5,
+        limitPrice: 0.5
+      },
+      preview: {
+        venue: "vistadex",
+        summary: "BUY $5 on condition 0xcondition, outcome 0",
+        notionalUsd: 5,
+        details: {}
+      },
+      execution: {
+        venue: "vistadex",
+        status: "filled",
+        details: { transactionSignature: "sig_conflict" }
+      },
+      market: {
+        conditionId: "0xdifferent"
+      }
+    }), /conditionId conflicts with the trade ticket/);
   });
 });
