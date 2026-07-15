@@ -692,6 +692,15 @@ hatch. If calibration datasets are missing, unreadable, or unable to produce
 historical-residual pricing, the run fails or skips buys instead of falling back
 to heuristic pricing.
 
+Vistadex event lookups and trade execution share the explicit
+`WEATHEREDGE_VISTADEX_MAX_ATTEMPTS` and
+`WEATHEREDGE_VISTADEX_RETRY_BACKOFF_MS` policy. A known transient such as an
+event that is still being created is retried once with the current production
+configuration. If that event remains unavailable, every affected market is
+reported as a failed decision and the run continues with independent events.
+Authentication, response-shape, and other non-transient failures still stop the
+run; no substitute event data or pricing model is used.
+
 `WEATHEREDGE_PAUSE_BUYS=true` leaves locked-position sales active but opens no
 new weather positions. The recent-audit gate should remain disabled until it is
 made strategy-lane-aware; otherwise older forecast-edge trades can block the

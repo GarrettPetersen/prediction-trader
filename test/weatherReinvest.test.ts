@@ -1,10 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  isRetryableVistadexExecutionError,
+  isRetryableVistadexTransientError,
   requireReinvestEntryWindows,
   requireReinvestPricingStrategy,
-  vistadexExecutionRetryDelayMs,
+  retryVistadexTransient,
+  vistadexRetryDelayMs,
   weatherHybridLaneBudgets,
   weatherReinvestEntryWindow,
   weatherReinvestExecutionFailures
@@ -157,20 +158,69 @@ describe("WeatherEdge Vistadex execution retry helpers", () => {
   });
 
   it("retries transient Vistadex filler and transport failures", () => {
-    assert.equal(isRetryableVistadexExecutionError(new Error("Timed out waiting for filler action")), true);
-    assert.equal(isRetryableVistadexExecutionError(new Error("WebSocket closed while waiting for filler action")), true);
-    assert.equal(isRetryableVistadexExecutionError(new Error("fetch failed")), true);
+    assert.equal(isRetryableVistadexTransientError(new Error("Timed out waiting for filler action")), true);
+    assert.equal(isRetryableVistadexTransientError(new Error("WebSocket closed while waiting for filler action")), true);
+    assert.equal(isRetryableVistadexTransientError(new Error("fetch failed")), true);
+    assert.equal(isRetryableVistadexTransientError(new Error('Event "highest-temperature-in-lucknow-on-july-16-2026" is still being created')), true);
   });
 
   it("does not retry deterministic trade validation failures", () => {
-    assert.equal(isRetryableVistadexExecutionError(new Error("Retry buy quote 0.9000 above max acceptable 0.8000.")), false);
-    assert.equal(isRetryableVistadexExecutionError(new Error("Vistadex buy requires amountUsd.")), false);
+    assert.equal(isRetryableVistadexTransientError(new Error("Retry buy quote 0.9000 above max acceptable 0.8000.")), false);
+    assert.equal(isRetryableVistadexTransientError(new Error("Vistadex buy requires amountUsd.")), false);
   });
 
   it("uses exponential retry backoff", () => {
-    assert.equal(vistadexExecutionRetryDelayMs(10_000, 1), 10_000);
-    assert.equal(vistadexExecutionRetryDelayMs(10_000, 2), 20_000);
-    assert.equal(vistadexExecutionRetryDelayMs(10_000, 3), 40_000);
+    assert.equal(vistadexRetryDelayMs(10_000, 1), 10_000);
+    assert.equal(vistadexRetryDelayMs(10_000, 2), 20_000);
+    assert.equal(vistadexRetryDelayMs(10_000, 3), 40_000);
+  });
+
+  it("retries a transient Vistadex operation once and returns its result", async () => {
+    let calls = 0;
+    const result = await retryVistadexTransient(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('Event "lucknow" is still being created');
+      return "ready";
+    }, {
+      label: "Lucknow event lookup",
+      maxAttempts: 2,
+      retryBackoffMs: 0
+    });
+
+    assert.equal(result, "ready");
+    assert.equal(calls, 2);
+  });
+
+  it("reports an exhausted transient Vistadex operation with context", async () => {
+    let calls = 0;
+    await assert.rejects(
+      retryVistadexTransient(async () => {
+        calls += 1;
+        throw new Error('Event "lucknow" is still being created');
+      }, {
+        label: "Lucknow event lookup",
+        maxAttempts: 2,
+        retryBackoffMs: 0
+      }),
+      /Lucknow event lookup failed after 2 attempts: Event "lucknow" is still being created/
+    );
+    assert.equal(calls, 2);
+  });
+
+  it("does not retry a non-transient Vistadex operation failure", async () => {
+    let calls = 0;
+    await assert.rejects(
+      retryVistadexTransient(async () => {
+        calls += 1;
+        throw new Error("Vistadex authentication failed");
+      }, {
+        label: "event lookup",
+        maxAttempts: 2,
+        retryBackoffMs: 0
+      }),
+      /Vistadex authentication failed/
+    );
+    assert.equal(calls, 1);
   });
 
   it("surfaces failed live execution attempts", () => {

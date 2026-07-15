@@ -321,12 +321,19 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function isRetryableVistadexExecutionError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /timed out waiting for filler action|timed out waiting for rfq websocket subscription|websocket closed while waiting for filler action|websocket closed while waiting for auction result|fetch failed|network|socket|econnreset|etimedout|eai_again/i.test(message);
+export function isRetryableVistadexTransientError(error: unknown): boolean {
+  const messages: string[] = [];
+  let current: unknown = error;
+  const visited = new Set<unknown>();
+  while (current !== undefined && current !== null && !visited.has(current)) {
+    visited.add(current);
+    messages.push(current instanceof Error ? current.message : String(current));
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return /still being created|timed out waiting for filler action|timed out waiting for rfq websocket subscription|websocket closed while waiting for filler action|websocket closed while waiting for auction result|fetch failed|network|socket|econnreset|etimedout|eai_again/i.test(messages.join("\n"));
 }
 
-export function vistadexExecutionRetryDelayMs(baseDelayMs: number, attempt: number): number {
+export function vistadexRetryDelayMs(baseDelayMs: number, attempt: number): number {
   if (!Number.isFinite(baseDelayMs) || baseDelayMs < 0) {
     throw new Error("Vistadex retry backoff must be a non-negative number.");
   }
@@ -334,6 +341,40 @@ export function vistadexExecutionRetryDelayMs(baseDelayMs: number, attempt: numb
     throw new Error("Vistadex retry attempt must be a positive number.");
   }
   return Math.round(baseDelayMs * (2 ** Math.max(0, Math.trunc(attempt) - 1)));
+}
+
+export async function retryVistadexTransient<T>(
+  operation: () => Promise<T>,
+  options: {
+    label: string;
+    maxAttempts: number;
+    retryBackoffMs: number;
+  }
+): Promise<T> {
+  if (!Number.isInteger(options.maxAttempts) || options.maxAttempts < 1) {
+    throw new Error("Vistadex retry max attempts must be a positive integer.");
+  }
+  if (!Number.isFinite(options.retryBackoffMs) || options.retryBackoffMs < 0) {
+    throw new Error("Vistadex retry backoff must be a non-negative number.");
+  }
+
+  for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isRetryableVistadexTransientError(error)) throw error;
+      if (attempt === options.maxAttempts) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `${options.label} failed after ${options.maxAttempts} attempts: ${message}`,
+          { cause: error }
+        );
+      }
+      await sleep(vistadexRetryDelayMs(options.retryBackoffMs, attempt));
+    }
+  }
+
+  throw new Error(`${options.label} retry loop ended without a result.`);
 }
 
 export function deployableWeatherCash(cashUsd: number, targetCashReserveUsd = 0): number {
@@ -852,9 +893,9 @@ async function maybeExecuteVistadexTrade(
       return { execution, ledger, attempts, quote: activeQuote };
     } catch (error) {
       lastError = error;
-      const retryable = isRetryableVistadexExecutionError(error);
+      const retryable = isRetryableVistadexTransientError(error);
       const shouldRetry = retryable && attempt < options.maxAttempts;
-      const nextDelayMs = shouldRetry ? vistadexExecutionRetryDelayMs(options.retryBackoffMs, attempt) : undefined;
+      const nextDelayMs = shouldRetry ? vistadexRetryDelayMs(options.retryBackoffMs, attempt) : undefined;
       attempts.push({
         attempt,
         maxAttempts: options.maxAttempts,
@@ -1018,9 +1059,20 @@ function confidenceAtLeast(value: WeatherReinvestConfidence, minimum: WeatherRei
 
 async function loadVistadexEventMarkets(
   config: AppConfig,
-  eventSlug: string
+  eventSlug: string,
+  options: {
+    maxAttempts: number;
+    retryBackoffMs: number;
+  }
 ): Promise<Map<string, VistadexMarketReference>> {
-  const event = await getVistadexEvent(config, eventSlug);
+  const event = await retryVistadexTransient(
+    () => getVistadexEvent(config, eventSlug),
+    {
+      label: `Vistadex event lookup for "${eventSlug}"`,
+      maxAttempts: options.maxAttempts,
+      retryBackoffMs: options.retryBackoffMs
+    }
+  );
   const eventRecord = (event as { event?: unknown }).event;
   const eventDescription = eventRecord && typeof eventRecord === "object"
     ? typeof (eventRecord as Record<string, unknown>).description === "string"
@@ -1093,6 +1145,7 @@ async function buyPositiveWeatherEdges(
   const skipped: WeatherReinvestTradeResult[] = [];
   const warnings: string[] = [];
   const eventCache = new Map<string, Map<string, VistadexMarketReference>>();
+  const eventFailures = new Map<string, string>();
   const heldConditionIds = new Set(positions.flatMap((position) => position.conditionId ? [position.conditionId] : []));
   const exposure = currentGroupExposure(positions);
   let availableCash = cashUsd;
@@ -1206,9 +1259,39 @@ async function buyPositiveWeatherEdges(
       continue;
     }
 
-    const eventMarkets = eventCache.get(row.eventSlug)
-      ?? await loadVistadexEventMarkets(config, row.eventSlug);
-    eventCache.set(row.eventSlug, eventMarkets);
+    const priorEventFailure = eventFailures.get(row.eventSlug);
+    if (priorEventFailure) {
+      skipped.push({
+        ...base,
+        status: "failed",
+        reason: "Vistadex event lookup already failed for another market in this event during this run.",
+        error: priorEventFailure
+      });
+      continue;
+    }
+
+    let eventMarkets = eventCache.get(row.eventSlug);
+    if (!eventMarkets) {
+      try {
+        eventMarkets = await loadVistadexEventMarkets(config, row.eventSlug, {
+          maxAttempts: options.vistadexMaxAttempts,
+          retryBackoffMs: options.vistadexRetryBackoffMs
+        });
+        eventCache.set(row.eventSlug, eventMarkets);
+      } catch (error) {
+        if (!isRetryableVistadexTransientError(error)) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        eventFailures.set(row.eventSlug, message);
+        warnings.push(`${row.eventSlug}: ${message}`);
+        skipped.push({
+          ...base,
+          status: "failed",
+          reason: "Transient Vistadex event lookup remained unavailable after retry; continuing with independent events.",
+          error: message
+        });
+        continue;
+      }
+    }
     const marketRef = eventMarkets.get(row.marketSlug);
     if (!marketRef) {
       skipped.push({ ...base, status: "skipped", reason: "Could not map market slug to a Vistadex condition id." });
