@@ -8,6 +8,23 @@ import {
 import type { WeatherMarketGroup } from "../src/weatherMarkets.js";
 import type { WeatherPricingReport } from "../src/weatherPricing.js";
 
+function parsedLondonOutcome(rawValue: number) {
+  return {
+    city: "London",
+    date: "2026-07-04",
+    measure: "temperature_high" as const,
+    outcome: {
+      kind: "exact" as const,
+      label: `${rawValue}C`,
+      unit: "C" as const,
+      lowerTempC: rawValue - 0.5,
+      upperTempC: rawValue + 0.5,
+      exactTempC: rawValue,
+      rawValue
+    }
+  };
+}
+
 function group(date: string, city: string): WeatherMarketGroup {
   return {
     eventSlug: `highest-temperature-in-${city.toLowerCase()}-on-${date}`,
@@ -76,8 +93,8 @@ describe("weather edge reports", () => {
         marketCount: 2
       },
       markets: [
-        { marketSlug: "london-20c", liquidity: 200, volume: 30 },
-        { marketSlug: "london-21c", liquidity: 100, volume: 20 }
+        { marketSlug: "london-20c", liquidity: 200, volume: 30, parsed: parsedLondonOutcome(20) },
+        { marketSlug: "london-21c", liquidity: 100, volume: 20, parsed: parsedLondonOutcome(21) }
       ],
       location: {
         name: "London",
@@ -144,7 +161,7 @@ describe("weather edge reports", () => {
         measure: "temperature_high",
         marketCount: 1
       },
-      markets: [{ marketSlug: "london-20c", liquidity: 200, volume: 30 }],
+      markets: [{ marketSlug: "london-20c", liquidity: 200, volume: 30, parsed: parsedLondonOutcome(20) }],
       location: {
         name: "London",
         latitude: 51.5,

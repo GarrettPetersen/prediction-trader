@@ -1,17 +1,159 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  assertCompleteWeatherEdgeReport,
+  buildWeatherVenueRoutes,
   isRetryableVistadexTransientError,
   requireReinvestEntryWindows,
   requireReinvestPricingStrategy,
+  requireVistadexEventMarkets,
   retryVistadexTransient,
+  selectBestWeatherVenueQuote,
   vistadexRetryDelayMs,
   weatherHybridLaneBudgets,
   weatherReinvestEntryWindow,
   weatherReinvestExecutionFailures
 } from "../src/weatherReinvest.js";
+import type { WeatherEdgeRow } from "../src/weatherEdges.js";
+
+function venueRow(overrides: Partial<WeatherEdgeRow> = {}): WeatherEdgeRow {
+  return {
+    referencePlatform: "polymarket",
+    eventSlug: "highest-temperature-in-new-york-on-july-17-2026",
+    eventTitle: "Highest temperature in New York",
+    city: "New York",
+    date: "2026-07-17",
+    measure: "temperature_high",
+    marketSlug: "new-york-89-90f",
+    question: "Will the highest temperature in New York be between 89-90F?",
+    outcomeLabel: "89-90F",
+    outcomeKind: "range",
+    outcomeUnit: "F",
+    lowerTempC: 31.3888888889,
+    upperTempC: 32.5,
+    bestSide: "YES",
+    signal: "BUY_YES",
+    fairYes: 0.6,
+    fairNo: 0.4,
+    bestEdge: 0.15,
+    confidence: "HIGH",
+    kellyFraction: 0.05,
+    suggestedSizeUsd: 5,
+    strategy: "forecast_edge",
+    forecastTargetMatched: true,
+    forecastStationId: "KNYC",
+    modelMode: "historical_residuals",
+    reason: "test",
+    ...overrides
+  };
+}
 
 describe("WeatherEdge Vistadex execution retry helpers", () => {
+  it("treats an event shell without markets as an explicit transient state", () => {
+    assert.throws(
+      () => requireVistadexEventMarkets({ event: { slug: "kxhighny-26jul17" }, markets: [] }, "kxhighny-26jul17"),
+      /still being created: no markets are available yet/
+    );
+    assert.equal(
+      isRetryableVistadexTransientError(
+        new Error('Vistadex event "kxhighny-26jul17" is still being created: no markets are available yet.')
+      ),
+      true
+    );
+    assert.deepEqual(requireVistadexEventMarkets({ markets: [{ market: {} }] }, "kxhighny-26jul17"), [{ market: {} }]);
+  });
+
+  it("refuses to trade from a partial venue pricing scan", () => {
+    assert.doesNotThrow(() => assertCompleteWeatherEdgeReport({ erroredGroups: 0, errors: [] }));
+    assert.throws(
+      () => assertCompleteWeatherEdgeReport({
+        erroredGroups: 1,
+        errors: [{
+          eventSlug: "kxhighny-26jul17",
+          city: "New York",
+          date: "2026-07-17",
+          error: "Kalshi market source did not match the configured station."
+        }]
+      }),
+      /refusing to route against an incomplete Polymarket\/Kalshi comparison/
+    );
+  });
+
+  it("groups equivalent Kalshi and Polymarket contracts into one quote route", () => {
+    const polymarket = venueRow();
+    const kalshi = venueRow({
+      referencePlatform: "kalshi",
+      eventSlug: "kxhighny-26jul17",
+      marketSlug: "kxhighny-26jul17-b89.5"
+    });
+
+    const routes = buildWeatherVenueRoutes([polymarket, kalshi]);
+
+    assert.equal(routes.length, 1);
+    assert.deepEqual(routes[0].candidates.map((row) => row.referencePlatform).sort(), ["kalshi", "polymarket"]);
+  });
+
+  it("suppresses a weaker venue signal that would bet the opposite side", () => {
+    const routes = buildWeatherVenueRoutes([
+      venueRow({ bestEdge: 0.2 }),
+      venueRow({
+        referencePlatform: "kalshi",
+        eventSlug: "kxhighny-26jul17",
+        marketSlug: "kxhighny-26jul17-b89.5",
+        bestSide: "NO",
+        signal: "BUY_NO",
+        bestEdge: 0.1
+      })
+    ]);
+
+    assert.equal(routes[0].candidates.length, 2);
+    assert.equal(routes[0].candidates[0].referencePlatform, "polymarket");
+    assert.deepEqual(routes[0].candidates.map((row) => row.bestSide), ["YES", "YES"]);
+    assert.equal(routes[0].suppressed[0].referencePlatform, "kalshi");
+  });
+
+  it("quotes an equivalent venue even when its snapshot did not emit a signal", () => {
+    const routes = buildWeatherVenueRoutes([
+      venueRow(),
+      venueRow({
+        referencePlatform: "kalshi",
+        eventSlug: "kxhighny-26jul17",
+        marketSlug: "kxhighny-26jul17-b89.5",
+        bestSide: "NO",
+        signal: "SKIP",
+        suggestedSizeUsd: undefined,
+        kellyFraction: 0,
+        fairYes: 0.55,
+        fairNo: 0.45
+      })
+    ]);
+
+    assert.equal(routes.length, 1);
+    assert.equal(routes[0].candidates.length, 2);
+    assert.equal(routes[0].candidates[1].referencePlatform, "kalshi");
+    assert.equal(routes[0].candidates[1].bestSide, "YES");
+    assert.equal(routes[0].candidates[1].fairYes, 0.6);
+    assert.equal(routes[0].candidates[1].suggestedSizeUsd, 5);
+  });
+
+  it("selects the venue with the strongest executable edge", () => {
+    const polymarket = venueRow();
+    const kalshi = venueRow({ referencePlatform: "kalshi", eventSlug: "kxhighny-26jul17" });
+    const selected = selectBestWeatherVenueQuote([
+      { row: polymarket, fairPrice: 0.6, pricePerShare: 0.52, value: "polymarket" },
+      { row: kalshi, fairPrice: 0.6, pricePerShare: 0.47, value: "kalshi" }
+    ]);
+
+    assert.equal(selected?.value, "kalshi");
+  });
+
+  it("rejects signals that lack strict venue comparison metadata", () => {
+    assert.throws(
+      () => buildWeatherVenueRoutes([venueRow({ forecastStationId: undefined })]),
+      /missing strict venue-routing metadata/
+    );
+  });
+
   it("requires an explicit live pricing strategy", () => {
     assert.throws(
       () => requireReinvestPricingStrategy({}),

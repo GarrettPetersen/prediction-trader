@@ -86,6 +86,7 @@ import {
 import {
   fetchPolymarketWeatherEventBySlug,
   fetchPolymarketWeatherMarkets,
+  fetchWeatherMarkets,
   type WeatherMarketGroup
 } from "./weatherMarkets.js";
 import {
@@ -633,6 +634,7 @@ function compactWeatherSourceResult(result: WeatherSourceResult) {
 
 function compactWeatherMarketGroup(group: WeatherMarketGroup) {
   return {
+    referencePlatform: group.referencePlatform,
     event: {
       slug: group.eventSlug,
       title: group.eventTitle,
@@ -700,6 +702,7 @@ function round(value: number | undefined, decimals = 4): number | undefined {
 
 function compactWeatherEdgeRow(row: WeatherEdgeRow) {
   return {
+    referencePlatform: row.referencePlatform,
     signal: row.signal,
     bestSide: row.bestSide,
     bestEdge: round(row.bestEdge),
@@ -1290,6 +1293,20 @@ async function historicalSoccerScoreReport(args: Args, fixture: { home: string; 
 
 function weatherPricingOptions(args: Args) {
   const noaaYears = numberArg(args, "noaa-years", false);
+  const strategy = weatherTradingStrategyArg(args);
+  const marketAnchorCoefficient = numberArg(args, "market-anchor-coefficient", false);
+  const marketAnchorMinOppositeMarketProbability = numberArg(args, "market-anchor-min-opposite-probability", false);
+  const hybridNormalMinMarketProbability = numberArg(args, "hybrid-normal-min-market-probability", false);
+  const marketInformed = strategy === "market_informed_inverse" || strategy === "market_informed_hybrid";
+  if (marketInformed && (
+    marketAnchorCoefficient === undefined ||
+    marketAnchorMinOppositeMarketProbability === undefined
+  )) {
+    throw new Error("Market-informed weather pricing requires --market-anchor-coefficient and --market-anchor-min-opposite-probability.");
+  }
+  if (strategy === "market_informed_hybrid" && hybridNormalMinMarketProbability === undefined) {
+    throw new Error("Hybrid weather pricing requires --hybrid-normal-min-market-probability.");
+  }
   return {
     bankrollUsd: numberArg(args, "bankroll", false),
     maxPerTradeUsd: numberArg(args, "max-per-trade", false) ?? numberArg(args, "max-usd", false),
@@ -1307,7 +1324,18 @@ function weatherPricingOptions(args: Args) {
     noaaLocationId: stringArg(args, "ncei-location", false),
     countryCode: stringArg(args, "country", false),
     allowCityForecast: args["allow-city-forecast"] === true,
-    sizingStrategy: weatherSizingStrategyArg(args)
+    sizingStrategy: weatherSizingStrategyArg(args),
+    strategy,
+    marketAnchor: marketInformed
+      ? {
+        coefficient: marketAnchorCoefficient as number,
+        minOppositeMarketProbability: marketAnchorMinOppositeMarketProbability as number,
+        minExecutableEdge: numberArg(args, "buy-min-executable-edge", false) ?? 0.03
+      }
+      : undefined,
+    hybrid: strategy === "market_informed_hybrid"
+      ? { normalMinMarketProbability: hybridNormalMinMarketProbability as number }
+      : undefined
   };
 }
 
@@ -1426,7 +1454,7 @@ Commands:
   weather:trade-audit [--ledger PATH] [--venue all|polymarket|vistadex] [--since ISO] [--until ISO] [--mark mid|bid] [--no-live-marks] [--limit N] [--top N] [--raw]
   ledger:backfill [--ledger PATH] [--venue all|polymarket|vistadex] [--no-positions] [--no-fills] [--polymarket-first-page]
   weather:sources (--city CITY [--country CODE] | --latitude N --longitude N) [--days N] [--sources all|openmeteo_gfs,openmeteo_ecmwf,openmeteo_ukmo,nws,hko,noaa_ncei] [--ncei-location ID | --ncei-station ID] [--history-date YYYY-MM-DD] [--raw]
-  weather:scan [--limit N] [--max-pages N] [--include-expired] [--include-unparsed]
+  weather:scan [--date YYYY-MM-DD | --days-ahead N] [--limit N] [--max-pages N] [--include-expired] [--include-unparsed]
   weather:price --slug EVENT_SLUG [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N] [--country CODE] [--noaa-years N] [--no-calibration] [--calibration-half-life-days N] [--city-bias-prior-weight N] [--allow-city-forecast]
   weather:signals [--limit N] [--max-pages N] [--max-events N] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--min-edge N] [--no-calibration] [--allow-city-forecast]
   weather:edges [--date YYYY-MM-DD | --days-ahead N] [--top N | --all] [--signals-only] [--bankroll N] [--max-per-trade N] [--kelly-multiplier N] [--max-kelly-fraction N] [--sizing independent-kelly|city-portfolio] [--max-group-fraction N] [--portfolio-step-usd N] [--no-calibration] [--no-climatology] [--concurrency N] [--allow-city-forecast] [--allow-started-day] [--high-grace-minutes N] [--low-grace-minutes N]
@@ -1590,13 +1618,19 @@ async function run(): Promise<void> {
   }
 
   if (command === "weather:scan") {
-    const groups = await fetchPolymarketWeatherMarkets(config, {
+    const targetDate = stringArg(args, "date", false) ?? addDaysIso(
+      new Date().toISOString().slice(0, 10),
+      numberArg(args, "days-ahead", false) ?? 1
+    );
+    const groups = await fetchWeatherMarkets(config, {
+      date: targetDate,
       limit: numberArg(args, "limit", false),
       maxPages: numberArg(args, "max-pages", false),
       includeExpired: args["include-expired"] === true,
       includeUnparsed: args["include-unparsed"] === true
     });
     print({
+      targetDate,
       count: groups.length,
       groups: args.raw === true ? groups : groups.map(compactWeatherMarketGroup)
     });

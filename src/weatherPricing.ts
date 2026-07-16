@@ -123,7 +123,10 @@ export interface WeatherPricingReport {
   group: Omit<WeatherMarketGroup, "markets" | "unparsed"> & {
     marketCount: number;
   };
-  markets: Array<Pick<WeatherMarketCandidate, "marketSlug" | "liquidity" | "volume">>;
+  markets: Array<Pick<
+    WeatherMarketCandidate,
+    "marketSlug" | "liquidity" | "volume" | "referencePlatform" | "parsed"
+  >>;
   location: WeatherLocation;
   resolutionTarget?: WeatherPricingResolutionTarget;
   sources: Array<Pick<WeatherSourceResult, "source" | "provider" | "ok" | "skipped" | "note" | "error">>;
@@ -561,6 +564,14 @@ function marketToken(candidate: WeatherMarketCandidate, outcome: "Yes" | "No"): 
   return candidate.outcomes.find((item) => item.outcome.toLowerCase() === outcome.toLowerCase())?.tokenId;
 }
 
+function marketOutcomeAsk(candidate: WeatherMarketCandidate, outcome: "Yes" | "No"): number | undefined {
+  return candidate.outcomes.find((item) => item.outcome.toLowerCase() === outcome.toLowerCase())?.bestAsk;
+}
+
+function marketOutcomeBid(candidate: WeatherMarketCandidate, outcome: "Yes" | "No"): number | undefined {
+  return candidate.outcomes.find((item) => item.outcome.toLowerCase() === outcome.toLowerCase())?.bestBid;
+}
+
 function validateMarketAnchorOptions(options: WeatherMarketAnchorPricingOptions): void {
   if (!Number.isFinite(options.coefficient) || options.coefficient >= 0) {
     throw new Error("Market-informed inverse pricing requires a finite negative coefficient.");
@@ -670,10 +681,10 @@ function priceCandidate(
     candidate.parsed.outcome.upperTempC
   );
   const forecastFairNo = 1 - forecastFairYes;
-  const yesAsk = candidate.bestAsk ?? marketPrice(candidate, "Yes");
-  const yesBid = candidate.bestBid ?? marketPrice(candidate, "Yes");
-  const noAsk = marketPrice(candidate, "No") ?? (yesBid === undefined ? undefined : 1 - yesBid);
-  const noBid = marketPrice(candidate, "No") ?? (yesAsk === undefined ? undefined : 1 - yesAsk);
+  const yesAsk = marketOutcomeAsk(candidate, "Yes") ?? candidate.bestAsk ?? marketPrice(candidate, "Yes");
+  const yesBid = marketOutcomeBid(candidate, "Yes") ?? candidate.bestBid ?? marketPrice(candidate, "Yes");
+  const noAsk = marketOutcomeAsk(candidate, "No") ?? marketPrice(candidate, "No") ?? (yesBid === undefined ? undefined : 1 - yesBid);
+  const noBid = marketOutcomeBid(candidate, "No") ?? marketPrice(candidate, "No") ?? (yesAsk === undefined ? undefined : 1 - yesAsk);
   const yesReferencePrice = marketPrice(candidate, "Yes");
   const noReferencePrice = marketPrice(candidate, "No")
     ?? (yesReferencePrice === undefined ? undefined : 1 - yesReferencePrice);
@@ -1105,6 +1116,7 @@ export async function priceWeatherMarketGroup(
 
   return {
     group: {
+      referencePlatform: group.referencePlatform,
       eventSlug: group.eventSlug,
       eventTitle: group.eventTitle,
       eventEndDate: group.eventEndDate,
@@ -1116,7 +1128,9 @@ export async function priceWeatherMarketGroup(
     markets: group.markets.map((market) => ({
       marketSlug: market.marketSlug,
       liquidity: market.liquidity,
-      volume: market.volume
+      volume: market.volume,
+      referencePlatform: market.referencePlatform,
+      parsed: market.parsed
     })),
     location: forecastReport.location,
     resolutionTarget: forecastTarget.resolutionTarget,

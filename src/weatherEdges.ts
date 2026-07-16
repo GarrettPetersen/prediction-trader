@@ -1,12 +1,13 @@
 import type { AppConfig } from "./config.js";
 import {
-  fetchPolymarketWeatherMarkets,
+  fetchWeatherMarkets,
   type WeatherMarketGroup,
-  type WeatherMeasure
+  type WeatherMeasure,
+  type WeatherOutcomeKind,
+  type WeatherReferencePlatform
 } from "./weatherMarkets.js";
 import {
   priceWeatherMarketGroup,
-  rankWeatherSignals,
   type WeatherOutcomePricing,
   type WeatherPricingOptions,
   type WeatherPricingReport
@@ -15,6 +16,7 @@ import {
   assessWeatherTradingWindow,
   type WeatherTradingWindowAssessment
 } from "./weatherTradingWindow.js";
+import type { ParsedResolutionSource } from "./weatherStations.js";
 
 export interface WeatherEdgeReportOptions extends WeatherPricingOptions {
   date?: string;
@@ -35,6 +37,7 @@ export interface WeatherEdgeReportOptions extends WeatherPricingOptions {
 }
 
 export interface WeatherEdgeRow {
+  referencePlatform?: WeatherReferencePlatform;
   eventSlug: string;
   eventTitle: string;
   eventEndDate?: string;
@@ -44,6 +47,10 @@ export interface WeatherEdgeRow {
   marketSlug: string;
   question: string;
   outcomeLabel: string;
+  outcomeKind?: WeatherOutcomeKind;
+  outcomeUnit?: "C" | "F";
+  lowerTempC?: number;
+  upperTempC?: number;
   bestSide: "YES" | "NO";
   signal: WeatherOutcomePricing["signal"];
   fairYes: number;
@@ -71,6 +78,7 @@ export interface WeatherEdgeRow {
   liquidity?: number;
   volume?: number;
   resolutionSource?: string;
+  resolutionProvider?: ParsedResolutionSource["provider"];
   forecastTargetMatched?: boolean;
   forecastStationId?: string;
   forecastStationName?: string;
@@ -143,6 +151,7 @@ export function buildWeatherEdgeRows(reports: WeatherPricingReport[]): WeatherEd
         const market = markets.get(outcome.marketSlug);
         const unsafeStartedDay = report.tradingWindow?.safeToTrade === false;
         return {
+          referencePlatform: market?.referencePlatform ?? report.group.referencePlatform,
           eventSlug: report.group.eventSlug,
           eventTitle: report.group.eventTitle,
           eventEndDate: report.group.eventEndDate,
@@ -152,6 +161,10 @@ export function buildWeatherEdgeRows(reports: WeatherPricingReport[]): WeatherEd
           marketSlug: outcome.marketSlug,
           question: outcome.question,
           outcomeLabel: outcome.outcomeLabel,
+          outcomeKind: market?.parsed.outcome.kind,
+          outcomeUnit: market?.parsed.outcome.unit,
+          lowerTempC: market?.parsed.outcome.lowerTempC,
+          upperTempC: market?.parsed.outcome.upperTempC,
           bestSide: side,
           signal: unsafeStartedDay ? "SKIP" as const : outcome.signal,
           fairYes: outcome.fairYes,
@@ -179,6 +192,7 @@ export function buildWeatherEdgeRows(reports: WeatherPricingReport[]): WeatherEd
           liquidity: market?.liquidity,
           volume: market?.volume,
           resolutionSource: report.resolutionTarget?.resolutionSource,
+          resolutionProvider: report.resolutionTarget?.resolution.provider,
           forecastTargetMatched: report.resolutionTarget?.matched,
           forecastStationId: report.resolutionTarget?.station?.id,
           forecastStationName: report.resolutionTarget?.station?.site,
@@ -271,7 +285,8 @@ export async function computeWeatherEdgeReport(
   options: WeatherEdgeReportOptions = {}
 ): Promise<WeatherEdgeReport> {
   const targetDate = options.date ?? localIsoDateDaysFrom(new Date(), options.daysAhead ?? 1);
-  const groups = await fetchPolymarketWeatherMarkets(config, {
+  const groups = await fetchWeatherMarkets(config, {
+    date: targetDate,
     limit: options.limit ?? 100,
     maxPages: options.maxPages ?? 20,
     includeExpired: options.includeExpired
@@ -309,8 +324,7 @@ export async function computeWeatherEdgeReport(
 
   const rows = buildWeatherEdgeRows(reports)
     .filter((row) => options.minLiquidity === undefined || (row.liquidity ?? 0) >= options.minLiquidity);
-  const signalSlugs = new Set(rankWeatherSignals(reports).map((signal) => signal.marketSlug));
-  const signals = rows.filter((row) => row.signal !== "SKIP" && signalSlugs.has(row.marketSlug));
+  const signals = rows.filter((row) => row.signal !== "SKIP");
 
   return {
     targetDate,

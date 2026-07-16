@@ -331,7 +331,9 @@ should use bulk date ranges when it needs dense historical series.
 
 The RainBot-style pipeline is CLI-first and review-first:
 
-1. Discover Polymarket weather events.
+1. Discover both Polymarket and Kalshi daily temperature events. Kalshi
+   discovery uses its public series metadata and market search APIs, so this
+   path does not require a Kalshi account or API key.
 2. Parse city, date, market type, and temperature outcome bins.
 3. Resolve the market's settlement feed/station, then pull current GFS, ECMWF,
    and UKMO forecasts for that exact target.
@@ -347,13 +349,23 @@ The RainBot-style pipeline is CLI-first and review-first:
    attractive buckets, pass `--sizing city-portfolio` to size the whole
    city/date/measure payoff curve instead of treating each bucket as an
    independent bet.
-8. Produce reviewable signals and paper-loop output.
+8. For equivalent station/date/payoff contracts, request a live Vistadex RFQ
+   for every available reference venue and execute only the quote with the
+   greatest remaining edge. A failure to scan or price either catalog aborts
+   new buys instead of silently routing against a partial comparison.
+9. Produce reviewable signals and paper-loop output.
 
 Discover active weather-temperature ladders:
 
 ```bash
-npm run weather:scan -- --limit 50 --max-pages 4
+npm run weather:scan -- --date 2026-07-17 --limit 50 --max-pages 4
 ```
+
+`weather:scan` labels every event with `referencePlatform`. Kalshi daily
+high/low contracts are admitted only when their series exposes an exact NWS
+Daily Climate Report URL that can be mapped to the forecast station. Unsupported
+or ambiguous settlement feeds fail validation; they are never replaced with a
+nearby city forecast.
 
 Price one Polymarket weather event by event slug:
 
@@ -387,8 +399,8 @@ npm run weather:tomorrow -- \
   --top 50
 ```
 
-That command defaults to tomorrow in the local machine timezone, scans the
-Polymarket `weather` tag, filters to parsed daily high/low temperature ladders,
+That command defaults to tomorrow in the local machine timezone, scans both
+Polymarket and Kalshi, filters to parsed daily high/low temperature ladders,
 prices each binary market, and prints a ranked edge table. Weather scans are
 market-local-time conservative by default: after station matching, `weather:edges`
 infers the resolution station timezone and skips a market if its local target
@@ -540,7 +552,14 @@ That command checks current Vistadex cash and positions, quotes weather
 positions that are effectively locked at `0.99+`, sells only if the live RFQ is
 still favorable, refreshes tomorrow's station-aligned weather edges, and buys
 positive-edge Vistadex weather positions with city/date portfolio sizing only
-inside each market's station-local day-ahead entry window. By default high
+inside each market's station-local day-ahead entry window. When Polymarket and
+Kalshi expose equivalent station/date/payoff contracts through Vistadex, the
+loop RFQs both and selects the lower executable price, accounting for the
+model's fair probability and minimum executable-edge requirement. The ledger
+stores the chosen reference platform and every venue quote considered. An
+unavailable quote is recorded as `no_quote`; a catalog, pricing, platform, or
+resolution-source mismatch fails closed instead of making the comparison with
+one venue missing. By default high
 temperature markets enter `20:00-23:30` on the local calendar day before the
 target date. Normal forecast-based low-temperature signals use `11:00-14:30`,
 while inverse low-temperature signals use their separate `20:00-23:30` window
@@ -550,8 +569,10 @@ window is held until a later scheduled run. The loop then checks source
 freshness before scanning markets: fresh buys
 require a common usable Open-Meteo GFS/ECMWF/UKMO model cycle, and the report
 records the exact model initialization and usability timestamps under
-`forecastFreshness`. The loop does not touch Polymarket. Add `--execute` only
-after `PREDICTION_TRADER_LIVE=1` is set and the dry-run report looks sane.
+`forecastFreshness`. All orders still execute through Vistadex: the loop does
+not place direct orders in either a Polymarket or Kalshi account, and it does
+not need direct exchange credentials. Add `--execute` only after
+`PREDICTION_TRADER_LIVE=1` is set and the dry-run report looks sane.
 
 The GitHub Actions schedule runs at `02:15, 05:15, 08:15, 11:15, 14:15,
 17:15, 20:15, 23:15 UTC`. Open-Meteo's GFS metadata typically advances before
@@ -582,17 +603,19 @@ market/forecast scan when the buy cash budget is below
 USDC cash after subtracting `--target-cash-reserve`, which lets the bot
 intentionally hold a cash buffer instead of spending the whole float. The buy
 cash budget is then capped by `--max-buy-spend-usd` and
-`--max-buy-spend-fraction`; the scheduled GitHub Actions loop defaults to
-`--max-per-trade 1` and `--max-buy-spend-fraction 0.05`, so no single fresh buy
-should exceed `$1` and a run cannot deploy more than 5% of bankroll into new
-positions. This keeps scheduled runs cheap when there is nothing meaningful to
-deploy.
+`--max-buy-spend-fraction`. The scheduled GitHub Actions loop requires an
+explicit `WEATHEREDGE_MAX_BUY_SPEND_FRACTION`; it has no implicit per-trade cap.
+Set `WEATHEREDGE_MAX_PER_TRADE` when a hard RFQ-level cap is wanted. The current
+repository policy uses a 25% account-wide buy budget per run and relies on
+Kelly sizing plus the 25% city/station/day exposure cap for individual
+allocation.
 
 The `--bankroll` override is optional. If omitted, the command uses current
 Vistadex cash plus marked position value. For example, a `$133` bankroll with
 `--max-group-fraction 0.25` permits up to `$33.25` of exposure in one
 city/station/day group, while `--max-per-trade` still caps each individual RFQ
-and `--max-buy-spend-fraction 0.05` caps new deployment for that run at `$6.65`.
+when configured and `--max-buy-spend-fraction 0.25` caps new deployment for
+that run at `$33.25`.
 
 ### GitHub Actions Weather Loop
 
@@ -1092,13 +1115,19 @@ slippage, and realized outcomes.
 Current WeatherEdge limits:
 
 - Live auto-execution exists only in the narrowly scoped `weather:reinvest`
-  Vistadex WeatherEdge loop. `weather:run` remains paper-only, and Polymarket is
-  not traded by the scheduled loop.
+  Vistadex WeatherEdge loop. `weather:run` remains paper-only. Polymarket and
+  Kalshi are reference venues whose linked conditions are RFQed and traded
+  through Vistadex; neither exchange receives direct orders from the scheduled
+  loop.
 - The parser currently targets city daily high/low temperature ladders. Global
   monthly temperature anomaly and record-rank markets are intentionally skipped.
 - Polymarket weather discovery uses the public Gamma `weather` tag and keyword
   shape checks. If Gamma tagging changes, use `--include-unparsed` to inspect
   misses.
+- Kalshi weather discovery uses the public climate/weather series catalog plus
+  a date-specific market search. Only daily high/low series with an exact,
+  supported NWS Daily Climate Report settlement source are eligible for live
+  routing.
 - Day-ahead forecast pricing does not use live observed running highs. Use
   `weather:midday` for same-day station markets: exact resolution-source
   actuals are available for Wunderground, HKO Daily Extract, and Weather.gov

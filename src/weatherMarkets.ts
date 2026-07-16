@@ -1,9 +1,15 @@
 import type { AppConfig } from "./config.js";
 import { fahrenheitToCelsius } from "./weatherEdge.js";
 import { parseGammaList } from "./marketplaces/polymarketData.js";
-import { resolutionSourceFromText } from "./weatherStations.js";
+import {
+  parseResolutionSource,
+  resolutionSourceFromText
+} from "./weatherStations.js";
 
 const POLYMARKET_GAMMA_BASE_URL = "https://gamma-api.polymarket.com";
+const KALSHI_PUBLIC_API_BASE_URL = "https://external-api.kalshi.com/trade-api/v2";
+const KALSHI_SEARCH_URL = "https://api.elections.kalshi.com/v1/search/series";
+const KALSHI_SEARCH_PAGE_SIZE = 200;
 const MONTHS: Record<string, number> = {
   january: 1,
   february: 2,
@@ -21,6 +27,7 @@ const MONTHS: Record<string, number> = {
 
 export type WeatherMeasure = "temperature_high" | "temperature_low";
 export type WeatherOutcomeKind = "exact" | "or_below" | "or_above" | "range";
+export type WeatherReferencePlatform = "polymarket" | "kalshi";
 
 export interface ParsedWeatherOutcome {
   kind: WeatherOutcomeKind;
@@ -44,9 +51,12 @@ export interface WeatherMarketOutcomeToken {
   outcome: string;
   tokenId?: string;
   price?: number;
+  bestBid?: number;
+  bestAsk?: number;
 }
 
 export interface WeatherMarketCandidate {
+  referencePlatform?: WeatherReferencePlatform;
   eventSlug: string;
   eventTitle: string;
   eventEndDate?: string;
@@ -69,6 +79,7 @@ export interface WeatherMarketCandidate {
 }
 
 export interface WeatherMarketGroup {
+  referencePlatform?: WeatherReferencePlatform;
   eventSlug: string;
   eventTitle: string;
   eventEndDate?: string;
@@ -80,6 +91,7 @@ export interface WeatherMarketGroup {
 }
 
 export interface WeatherScanOptions {
+  date?: string;
   limit?: number;
   maxPages?: number;
   includeExpired?: boolean;
@@ -87,6 +99,56 @@ export interface WeatherScanOptions {
   active?: boolean;
   closed?: boolean;
   ascending?: boolean;
+}
+
+export interface KalshiWeatherSeries {
+  ticker: string;
+  title: string;
+  category?: string;
+  frequency?: string;
+  settlement_sources?: Array<{ name?: string; url?: string }>;
+}
+
+export interface KalshiWeatherMarket {
+  ticker: string;
+  event_ticker: string;
+  title?: string;
+  subtitle?: string;
+  status?: string;
+  open_time?: string;
+  close_time?: string;
+  rules_primary?: string;
+  rules_secondary?: string;
+  yes_bid_dollars?: string;
+  yes_ask_dollars?: string;
+  no_bid_dollars?: string;
+  no_ask_dollars?: string;
+  last_price_dollars?: string;
+  volume?: number;
+  volume_fp?: string;
+  liquidity_dollars?: string;
+}
+
+interface KalshiSearchMarket {
+  ticker?: string;
+  yes_subtitle?: string;
+  yes_bid_dollars?: string;
+  yes_ask_dollars?: string;
+  last_price_dollars?: string;
+  close_ts?: string;
+  open_ts?: string;
+  volume?: number;
+}
+
+interface KalshiSearchEvent {
+  type?: string;
+  series_ticker?: string;
+  event_ticker?: string;
+  event_subtitle?: string;
+  event_title?: string;
+  category?: string;
+  active_market_count?: number;
+  markets?: KalshiSearchMarket[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -104,6 +166,11 @@ function boolValue(value: unknown): boolean {
 function numberValue(value: unknown): number | undefined {
   const number = Number(value);
   return Number.isFinite(number) ? number : undefined;
+}
+
+function kalshiOrderPrice(value: unknown): number | undefined {
+  const price = numberValue(value);
+  return price !== undefined && price > 0 && price <= 1 ? price : undefined;
 }
 
 export function resolvedYesFromOutcomeTokens(
@@ -269,6 +336,254 @@ export function parseWeatherMarketQuestion(
   return undefined;
 }
 
+function kalshiSeriesMeasure(title: string): WeatherMeasure | undefined {
+  if (/\b(?:lowest|minimum|min|low)\b.*\btemp(?:erature)?\b|\blow\s+temp(?:erature)?\b/i.test(title)) {
+    return "temperature_low";
+  }
+  if (/\b(?:highest|maximum|max|high)\b.*\btemp(?:erature)?\b|\bhigh\s+temp(?:erature)?\b/i.test(title)) {
+    return "temperature_high";
+  }
+  return undefined;
+}
+
+const KALSHI_CITY_ALIASES: Record<string, string> = {
+  dc: "Washington, DC",
+  la: "Los Angeles",
+  lv: "Las Vegas",
+  minnesota: "Minneapolis",
+  nola: "New Orleans",
+  ny: "New York City",
+  nyc: "New York City",
+  okc: "Oklahoma City",
+  satx: "San Antonio",
+  sfo: "San Francisco"
+};
+
+function normalizeKalshiCity(value: string): string | undefined {
+  const city = value.replace(/\s+/g, " ").replace(/[?.]+$/, "").trim();
+  if (!city || /^(?:cities|united states)$/i.test(city)) return undefined;
+  return KALSHI_CITY_ALIASES[city.toLowerCase()] ?? city;
+}
+
+export function parseKalshiWeatherSeries(
+  series: Pick<KalshiWeatherSeries, "ticker" | "title">
+): { city: string; measure: WeatherMeasure } | undefined {
+  if (!series.ticker.toUpperCase().startsWith("KX")) return undefined;
+  const measure = kalshiSeriesMeasure(series.title);
+  if (!measure) return undefined;
+
+  const title = series.title.replace(/\s+/g, " ").trim();
+  const patterns = [
+    /^(?:highest|lowest)\s+temperature(?:\s+in)?\s+(.+)$/i,
+    /^(.+?)\s+(?:daily\s+)?(?:maximum\s+high|minimum\s+low|maximum|minimum|max|min|high|low)(?:\s+daily)?\s+temp(?:erature)?(?:\s+daily)?$/i,
+    /^(?:daily\s+)?(?:maximum|minimum|max|min|high|low)(?:\s+daily)?\s+temp(?:erature)?\s+(.+)$/i,
+    /^(.+?)\s+(?:maximum|minimum|max|min|high|low)\s+temp(?:erature)?(?:\s+daily)?$/i
+  ];
+  for (const pattern of patterns) {
+    const match = title.match(pattern);
+    const city = match?.[1] ? normalizeKalshiCity(match[1]) : undefined;
+    if (city) return { city, measure };
+  }
+  return undefined;
+}
+
+function monthNumber(value: string): number | undefined {
+  const normalized = value.toLowerCase();
+  return MONTHS[normalized] ?? Object.entries(MONTHS)
+    .find(([month]) => month.startsWith(normalized.slice(0, 3)))?.[1];
+}
+
+function kalshiMarketDate(...texts: Array<string | undefined>): string | undefined {
+  for (const text of texts) {
+    const match = text?.match(/(?:on|for)\s+([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})/i);
+    if (!match) continue;
+    const month = monthNumber(match[1]);
+    const day = Number(match[2]);
+    const year = Number(match[3]);
+    if (!month || !Number.isInteger(day) || day < 1 || day > 31 || !Number.isInteger(year)) {
+      return undefined;
+    }
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+  return undefined;
+}
+
+function kalshiOutcomeFromRules(rules: string): ParsedWeatherOutcome | undefined {
+  const range = rules.match(/(?:\bbetween\s+)?(-?\d+(?:\.\d+)?)\s*(?:°|º)?\s*(?:and|-|to)\s*(-?\d+(?:\.\d+)?)\s*(?:°|º)?(?:\s*degrees?)?(?:\s*fahrenheit|\s*F)?/i);
+  if (range) {
+    const lowerRaw = Number(range[1]);
+    const upperRaw = Number(range[2]);
+    const halfBin = unitBinWidth("F") / 2;
+    return {
+      kind: "range",
+      label: `${lowerRaw}-${upperRaw}F`,
+      unit: "F",
+      lowerTempC: boundaryToCelsius(lowerRaw, "F") - halfBin,
+      upperTempC: boundaryToCelsius(upperRaw, "F") + halfBin,
+      rawValue: lowerRaw,
+      rawUpperValue: upperRaw
+    };
+  }
+
+  const orAbove = rules.match(/(-?\d+(?:\.\d+)?)\s*(?:°|º)?(?:\s*F)?\s+or\s+(?:above|higher)/i);
+  if (orAbove) {
+    const raw = Number(orAbove[1]);
+    return {
+      kind: "or_above",
+      label: `${raw}F or above`,
+      unit: "F",
+      lowerTempC: boundaryToCelsius(raw, "F") - unitBinWidth("F") / 2,
+      rawValue: raw
+    };
+  }
+
+  const orBelow = rules.match(/(-?\d+(?:\.\d+)?)\s*(?:°|º)?(?:\s*F)?\s+or\s+(?:below|lower)/i);
+  if (orBelow) {
+    const raw = Number(orBelow[1]);
+    return {
+      kind: "or_below",
+      label: `${raw}F or below`,
+      unit: "F",
+      upperTempC: boundaryToCelsius(raw, "F") + unitBinWidth("F") / 2,
+      rawValue: raw
+    };
+  }
+
+  const greater = rules.match(/\bgreater\s+than\s+(-?\d+(?:\.\d+)?)\s*(?:°|º)?/i);
+  if (greater) {
+    const threshold = Number(greater[1]);
+    const raw = threshold + 1;
+    return {
+      kind: "or_above",
+      label: `${raw}F or above`,
+      unit: "F",
+      lowerTempC: boundaryToCelsius(raw, "F") - unitBinWidth("F") / 2,
+      rawValue: raw
+    };
+  }
+
+  const less = rules.match(/\bless\s+than\s+(-?\d+(?:\.\d+)?)\s*(?:°|º)?/i);
+  if (less) {
+    const threshold = Number(less[1]);
+    const raw = threshold - 1;
+    return {
+      kind: "or_below",
+      label: `${raw}F or below`,
+      unit: "F",
+      upperTempC: boundaryToCelsius(raw, "F") + unitBinWidth("F") / 2,
+      rawValue: raw
+    };
+  }
+
+  return undefined;
+}
+
+function kalshiCanonicalQuestion(parsed: ParsedWeatherMarket): string {
+  const measure = parsed.measure === "temperature_high" ? "highest" : "lowest";
+  const date = new Date(`${parsed.date}T12:00:00Z`).toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    timeZone: "UTC"
+  });
+  const outcome = parsed.outcome.kind === "range"
+    ? `between ${parsed.outcome.rawValue}-${parsed.outcome.rawUpperValue}°F`
+    : parsed.outcome.kind === "or_above"
+      ? `${parsed.outcome.rawValue}°F or above`
+      : `${parsed.outcome.rawValue}°F or below`;
+  return `Will the ${measure} temperature in ${parsed.city} be ${outcome} on ${date}?`;
+}
+
+function kalshiResolutionSource(series: KalshiWeatherSeries): string {
+  const urls = (series.settlement_sources ?? [])
+    .map((source) => source.url?.trim())
+    .filter((url): url is string => Boolean(url));
+  const source = urls.find((url) => parseResolutionSource(url).provider === "nws_cli");
+  if (!source) {
+    throw new Error(`Kalshi weather series ${series.ticker} does not expose a supported NWS CLI settlement source.`);
+  }
+  return source;
+}
+
+function midpoint(bid: number | undefined, ask: number | undefined): number | undefined {
+  if (bid !== undefined && ask !== undefined) return (bid + ask) / 2;
+  return ask ?? bid;
+}
+
+export function normalizeKalshiWeatherMarket(
+  series: KalshiWeatherSeries,
+  market: KalshiWeatherMarket
+): WeatherMarketCandidate | undefined {
+  const parsedSeries = parseKalshiWeatherSeries(series);
+  if (!parsedSeries) return undefined;
+  const rules = [market.rules_primary, market.rules_secondary].filter(Boolean).join(" ");
+  const date = kalshiMarketDate(market.title, rules);
+  const outcome = kalshiOutcomeFromRules(rules);
+  if (!date) {
+    throw new Error(`Could not parse the settlement date for Kalshi weather market ${market.ticker}.`);
+  }
+  if (!outcome) {
+    throw new Error(`Could not parse the temperature payoff for Kalshi weather market ${market.ticker}.`);
+  }
+
+  const parsed: ParsedWeatherMarket = {
+    city: parsedSeries.city,
+    date,
+    measure: parsedSeries.measure,
+    outcome
+  };
+  const yesBid = kalshiOrderPrice(market.yes_bid_dollars);
+  const yesAsk = kalshiOrderPrice(market.yes_ask_dollars);
+  const directNoBid = kalshiOrderPrice(market.no_bid_dollars);
+  const directNoAsk = kalshiOrderPrice(market.no_ask_dollars);
+  const noBid = directNoBid ?? (yesAsk === undefined || yesAsk >= 1 ? undefined : 1 - yesAsk);
+  const noAsk = directNoAsk ?? (yesBid === undefined ? undefined : 1 - yesBid);
+  const lastPrice = kalshiOrderPrice(market.last_price_dollars);
+  const yesReference = midpoint(yesBid, yesAsk) ?? lastPrice;
+  const noReference = yesReference === undefined ? midpoint(noBid, noAsk) : 1 - yesReference;
+  const status = market.status?.toLowerCase();
+  if (!status) throw new Error(`Kalshi weather market ${market.ticker} is missing its status.`);
+  const active = status === "open" || status === "active" || status === "trading";
+  const closed = status === "closed" || status === "settled" || status === "finalized";
+  if (!active && !closed) {
+    throw new Error(`Unsupported Kalshi weather market status ${market.status} for ${market.ticker}.`);
+  }
+
+  return {
+    referencePlatform: "kalshi",
+    eventSlug: market.event_ticker.toLowerCase(),
+    eventTitle: `${parsedSeries.measure === "temperature_high" ? "Highest" : "Lowest"} temperature in ${parsedSeries.city} on ${date}`,
+    eventEndDate: market.close_time,
+    marketSlug: market.ticker.toLowerCase(),
+    question: kalshiCanonicalQuestion(parsed),
+    description: rules,
+    resolutionSource: kalshiResolutionSource(series),
+    active,
+    closed,
+    acceptingOrders: active && !closed,
+    bestBid: yesBid,
+    bestAsk: yesAsk,
+    liquidity: numberValue(market.liquidity_dollars),
+    volume: numberValue(market.volume_fp ?? market.volume),
+    outcomes: [
+      {
+        outcome: "Yes",
+        tokenId: `${market.ticker.toUpperCase()}:YES`,
+        price: yesReference,
+        bestBid: yesBid,
+        bestAsk: yesAsk
+      },
+      {
+        outcome: "No",
+        tokenId: `${market.ticker.toUpperCase()}:NO`,
+        price: noReference,
+        bestBid: noBid,
+        bestAsk: noAsk
+      }
+    ],
+    parsed
+  };
+}
+
 function normalizeWeatherMarketCandidate(
   event: Record<string, unknown>,
   market: Record<string, unknown>
@@ -300,6 +615,7 @@ function normalizeWeatherMarketCandidate(
   }));
 
   return {
+    referencePlatform: "polymarket",
     eventSlug,
     eventTitle,
     eventEndDate,
@@ -324,6 +640,7 @@ function normalizeWeatherMarketCandidate(
 
 function groupKey(candidate: WeatherMarketCandidate): string {
   return [
+    candidate.referencePlatform ?? "polymarket",
     candidate.eventSlug,
     candidate.parsed.city.toLowerCase(),
     candidate.parsed.date,
@@ -331,7 +648,7 @@ function groupKey(candidate: WeatherMarketCandidate): string {
   ].join("|");
 }
 
-async function fetchJson(url: URL): Promise<unknown> {
+async function fetchPolymarketJson(url: URL): Promise<unknown> {
   const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Polymarket Gamma request failed with HTTP ${response.status}: ${await response.text()}`);
@@ -364,7 +681,7 @@ export async function fetchPolymarketWeatherMarkets(
     url.searchParams.set("order", "endDate");
     url.searchParams.set("ascending", String(ascending));
 
-    const raw = await fetchJson(url);
+    const raw = await fetchPolymarketJson(url);
     if (!Array.isArray(raw) || raw.length === 0) break;
 
     for (const item of raw) {
@@ -389,6 +706,7 @@ export async function fetchPolymarketWeatherMarkets(
 
         const key = groupKey(normalized);
         const existing = groups.get(key) ?? {
+          referencePlatform: "polymarket" as const,
           eventSlug: normalized.eventSlug,
           eventTitle: normalized.eventTitle,
           eventEndDate: normalized.eventEndDate,
@@ -407,6 +725,7 @@ export async function fetchPolymarketWeatherMarkets(
         const eventTitle = stringValue(item.title) ?? "";
         const key = `${eventSlug}|unparsed`;
         const existing = groups.get(key) ?? {
+          referencePlatform: "polymarket" as const,
           eventSlug,
           eventTitle,
           eventEndDate,
@@ -434,7 +753,7 @@ export async function fetchPolymarketWeatherEventBySlug(
 ): Promise<WeatherMarketGroup[]> {
   const url = new URL("/events", POLYMARKET_GAMMA_BASE_URL);
   url.searchParams.set("slug", slug);
-  const raw = await fetchJson(url);
+  const raw = await fetchPolymarketJson(url);
   if (!Array.isArray(raw) || raw.length === 0) {
     throw new Error(`No Polymarket weather event found for slug ${slug}.`);
   }
@@ -453,6 +772,7 @@ export async function fetchPolymarketWeatherEventBySlug(
     }
     const key = groupKey(normalized);
     const existing = groups.get(key) ?? {
+      referencePlatform: "polymarket" as const,
       eventSlug: normalized.eventSlug,
       eventTitle: normalized.eventTitle,
       eventEndDate: normalized.eventEndDate,
@@ -469,6 +789,7 @@ export async function fetchPolymarketWeatherEventBySlug(
   if (options.includeUnparsed && eventUnparsed.length > 0) {
     const eventSlug = stringValue(event.slug) ?? slug;
     groups.set(`${eventSlug}|unparsed`, {
+      referencePlatform: "polymarket",
       eventSlug,
       eventTitle: stringValue(event.title) ?? "",
       eventEndDate: stringValue(event.endDate),
@@ -481,4 +802,151 @@ export async function fetchPolymarketWeatherEventBySlug(
   }
 
   return [...groups.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+async function fetchKalshiJson(url: URL): Promise<unknown> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Kalshi public API request failed with HTTP ${response.status}: ${await response.text()}`);
+  }
+  return response.json();
+}
+
+function kalshiSearchDate(date: string): string {
+  const parsed = new Date(`${date}T12:00:00Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
+    throw new Error(`Kalshi weather discovery requires a valid YYYY-MM-DD date; received ${date}.`);
+  }
+  return parsed.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC"
+  });
+}
+
+function normalizeKalshiSearchMarket(
+  event: KalshiSearchEvent,
+  market: KalshiSearchMarket
+): KalshiWeatherMarket {
+  if (!event.event_ticker || !event.event_subtitle || !market.ticker || !market.yes_subtitle) {
+    throw new Error("Kalshi weather search returned an incomplete event or market record.");
+  }
+  return {
+    ticker: market.ticker,
+    event_ticker: event.event_ticker,
+    title: event.event_subtitle,
+    subtitle: market.yes_subtitle,
+    status: "open",
+    open_time: market.open_ts,
+    close_time: market.close_ts,
+    rules_primary: `${event.event_subtitle}: ${market.yes_subtitle}`,
+    yes_bid_dollars: market.yes_bid_dollars,
+    yes_ask_dollars: market.yes_ask_dollars,
+    last_price_dollars: market.last_price_dollars,
+    volume: market.volume,
+    volume_fp: market.volume === undefined ? undefined : String(market.volume)
+  };
+}
+
+export async function fetchKalshiWeatherMarkets(
+  _config: AppConfig,
+  options: WeatherScanOptions = {}
+): Promise<WeatherMarketGroup[]> {
+  if (options.closed === true || options.active === false) {
+    throw new Error("Kalshi weather discovery currently supports open markets only.");
+  }
+  if (!options.date) {
+    throw new Error("Kalshi weather discovery requires an explicit target date.");
+  }
+  const seriesUrl = new URL(`${KALSHI_PUBLIC_API_BASE_URL}/series`);
+  seriesUrl.searchParams.set("category", "Climate and Weather");
+  const rawSeries = await fetchKalshiJson(seriesUrl);
+  if (!isRecord(rawSeries) || !Array.isArray(rawSeries.series)) {
+    throw new Error("Malformed Kalshi series response.");
+  }
+  const series = rawSeries.series
+    .filter(isRecord)
+    .map((item) => item as unknown as KalshiWeatherSeries)
+    .filter((item) => (item.settlement_sources ?? []).some((source) =>
+      parseResolutionSource(source.url).provider === "nws_cli"
+    ))
+    .filter((item) => parseKalshiWeatherSeries(item) !== undefined);
+  if (series.length === 0) {
+    throw new Error("Kalshi returned no supported daily high/low weather series.");
+  }
+
+  const seriesByTicker = new Map(series.map((item) => [item.ticker.toUpperCase(), item]));
+  const searchUrl = new URL(KALSHI_SEARCH_URL);
+  searchUrl.searchParams.set("query", `temperature on ${kalshiSearchDate(options.date)}`);
+  searchUrl.searchParams.set("page_size", String(KALSHI_SEARCH_PAGE_SIZE));
+  searchUrl.searchParams.set("order_by", "volume");
+  searchUrl.searchParams.set("status", "open");
+  const rawSearch = await fetchKalshiJson(searchUrl);
+  if (!isRecord(rawSearch) || !Array.isArray(rawSearch.current_page)) {
+    throw new Error("Malformed Kalshi weather search response.");
+  }
+  const totalResults = numberValue(rawSearch.total_results_count);
+  if (totalResults === undefined || totalResults > rawSearch.current_page.length) {
+    throw new Error(`Kalshi weather search was truncated: received ${rawSearch.current_page.length} of ${totalResults ?? "unknown"} results.`);
+  }
+
+  const groups = new Map<string, WeatherMarketGroup>();
+  const now = Date.now();
+
+  for (const rawEvent of rawSearch.current_page) {
+    if (!isRecord(rawEvent)) continue;
+    const event = rawEvent as unknown as KalshiSearchEvent;
+    const item = event.series_ticker ? seriesByTicker.get(event.series_ticker.toUpperCase()) : undefined;
+    if (!item) continue;
+    if (event.type !== "contract" || event.category !== "Climate and Weather") continue;
+    const openMarkets = Array.isArray(event.markets) ? event.markets : [];
+    if ((event.active_market_count ?? 0) !== openMarkets.length) {
+      throw new Error(`Kalshi weather search returned ${openMarkets.length} of ${event.active_market_count ?? "unknown"} active markets for ${event.event_ticker ?? item.ticker}.`);
+    }
+    for (const searchMarket of openMarkets) {
+      const rawMarket = normalizeKalshiSearchMarket(event, searchMarket);
+      const candidate = normalizeKalshiWeatherMarket(item, rawMarket);
+      if (!candidate || !candidate.active || candidate.closed || candidate.acceptingOrders === false) continue;
+      if (candidate.parsed.date !== options.date) continue;
+      if (!options.includeExpired && candidate.eventEndDate && Date.parse(candidate.eventEndDate) < now) continue;
+      const key = groupKey(candidate);
+      const existing = groups.get(key) ?? {
+        referencePlatform: "kalshi" as const,
+        eventSlug: candidate.eventSlug,
+        eventTitle: candidate.eventTitle,
+        eventEndDate: candidate.eventEndDate,
+        city: candidate.parsed.city,
+        date: candidate.parsed.date,
+        measure: candidate.parsed.measure,
+        markets: [],
+        unparsed: []
+      };
+      existing.markets.push(candidate);
+      groups.set(key, existing);
+    }
+  }
+
+  return [...groups.values()].sort((a, b) => {
+    const endDate = (a.eventEndDate ?? "").localeCompare(b.eventEndDate ?? "");
+    if (endDate !== 0) return endDate;
+    return a.eventSlug.localeCompare(b.eventSlug);
+  });
+}
+
+export async function fetchWeatherMarkets(
+  config: AppConfig,
+  options: WeatherScanOptions = {}
+): Promise<WeatherMarketGroup[]> {
+  const [polymarket, kalshi] = await Promise.all([
+    fetchPolymarketWeatherMarkets(config, options),
+    fetchKalshiWeatherMarkets(config, options)
+  ]);
+  return [...polymarket, ...kalshi]
+    .filter((group) => options.date === undefined || group.date === options.date)
+    .sort((a, b) => {
+    const endDate = (a.eventEndDate ?? "").localeCompare(b.eventEndDate ?? "");
+    if (endDate !== 0) return endDate;
+    return a.eventSlug.localeCompare(b.eventSlug);
+  });
 }

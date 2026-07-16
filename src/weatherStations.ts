@@ -3,7 +3,7 @@ import type { WeatherMarketGroup } from "./weatherMarkets.js";
 
 export interface ParsedResolutionSource {
   raw?: string;
-  provider: "wunderground" | "noaa_timeseries" | "hko" | "missing" | "unknown";
+  provider: "wunderground" | "noaa_timeseries" | "nws_cli" | "hko" | "missing" | "unknown";
   stationId?: string;
   locationPath?: string;
   note?: string;
@@ -61,6 +61,10 @@ function numberValue(value: unknown): number | undefined {
   return Number.isFinite(number) ? number : undefined;
 }
 
+function canonicalResolutionUrlText(source: string): string {
+  return source.trim().replace(/[.,;:!?]+$/g, "");
+}
+
 export function normalizeWeatherCityKey(value: string | undefined): string {
   const normalized = (value ?? "")
     .normalize("NFD")
@@ -88,12 +92,14 @@ export function weatherLocationTargetKey(location: { latitude: number; longitude
 export function parseResolutionSource(source: string | undefined): ParsedResolutionSource {
   if (!source) return { provider: "missing" };
 
+  const canonicalSource = canonicalResolutionUrlText(source);
+
   let url: URL;
   try {
-    url = new URL(source);
+    url = new URL(canonicalSource);
   } catch {
     return {
-      raw: source,
+      raw: canonicalSource,
       provider: "unknown",
       note: "Resolution source is not a parseable URL."
     };
@@ -103,21 +109,45 @@ export function parseResolutionSource(source: string | undefined): ParsedResolut
     const stationId = url.searchParams.get("site")?.trim().toUpperCase();
     if (!stationId) {
       return {
-        raw: source,
+        raw: canonicalSource,
         provider: "noaa_timeseries",
         note: "NOAA timeseries URL did not include a station site."
       };
     }
     return {
-      raw: source,
+      raw: canonicalSource,
       provider: "noaa_timeseries",
       stationId
     };
   }
 
+  if (/weather\.gov$/i.test(url.hostname) && url.pathname.toLowerCase() === "/product.php") {
+    const product = url.searchParams.get("product")?.trim().toUpperCase();
+    const issuedBy = url.searchParams.get("issuedby")?.trim().toUpperCase();
+    if (product !== "CLI") {
+      return {
+        raw: canonicalSource,
+        provider: "unknown",
+        note: `Unsupported NWS product ${product ?? "missing"}.`
+      };
+    }
+    if (!issuedBy || !/^[A-Z0-9]{3,4}$/.test(issuedBy)) {
+      return {
+        raw: canonicalSource,
+        provider: "nws_cli",
+        note: "NWS Climatological Report URL did not include a valid issuedby station code."
+      };
+    }
+    return {
+      raw: canonicalSource,
+      provider: "nws_cli",
+      stationId: issuedBy.length === 3 ? `K${issuedBy}` : issuedBy
+    };
+  }
+
   if (/weather\.gov\.hk$/i.test(url.hostname) || /\.weather\.gov\.hk$/i.test(url.hostname)) {
     return {
-      raw: source,
+      raw: canonicalSource,
       provider: "hko",
       stationId: HONG_KONG_OBSERVATORY_STATION.id
     };
@@ -125,7 +155,7 @@ export function parseResolutionSource(source: string | undefined): ParsedResolut
 
   if (!/wunderground\.com$/i.test(url.hostname) && !/\.wunderground\.com$/i.test(url.hostname)) {
     return {
-      raw: source,
+      raw: canonicalSource,
       provider: "unknown",
       note: `Unsupported resolution host ${url.hostname}.`
     };
@@ -136,14 +166,14 @@ export function parseResolutionSource(source: string | undefined): ParsedResolut
   const stationId = segments.at(-1)?.toUpperCase();
   if (dailyIndex < 0 || !stationId || stationId === "DAILY") {
     return {
-      raw: source,
+      raw: canonicalSource,
       provider: "wunderground",
       note: "Wunderground URL did not include the expected /history/daily/.../STATION shape."
     };
   }
 
   return {
-    raw: source,
+    raw: canonicalSource,
     provider: "wunderground",
     stationId,
     locationPath: segments.slice(dailyIndex + 1, -1).join("/")
@@ -154,17 +184,26 @@ export function resolutionSourceFromText(text: string | undefined): string | und
   if (!text) return undefined;
 
   const wunderground = text.match(/https?:\/\/(?:www\.)?wunderground\.com\/history\/daily\/[^\s"'<>)]*/i);
-  if (wunderground) return wunderground[0];
+  if (wunderground) return canonicalResolutionUrlText(wunderground[0]);
 
   const noaa = text.match(/https?:\/\/www\.weather\.gov\/wrh\/timeseries\?site=([a-z0-9]+)/i);
   if (noaa) {
-    const url = new URL(noaa[0]);
+    const url = new URL(canonicalResolutionUrlText(noaa[0]));
     url.searchParams.set("site", (url.searchParams.get("site") ?? "").toUpperCase());
     return url.toString();
   }
 
+  const nwsCli = text.match(/https?:\/\/forecast\.weather\.gov\/product\.php\?[^\s"'<>)]*\bproduct=CLI\b[^\s"'<>)]*/i);
+  if (nwsCli) {
+    const url = new URL(canonicalResolutionUrlText(nwsCli[0]));
+    const issuedBy = url.searchParams.get("issuedby");
+    if (issuedBy) url.searchParams.set("issuedby", issuedBy.toUpperCase());
+    url.searchParams.set("product", "CLI");
+    return url.toString();
+  }
+
   const hko = text.match(/https?:\/\/(?:www\.)?weather\.gov\.hk\/[^\s"'<>)]*/i);
-  if (hko) return hko[0];
+  if (hko) return canonicalResolutionUrlText(hko[0]);
 
   return undefined;
 }
@@ -175,6 +214,25 @@ export function firstResolutionSource(group: WeatherMarketGroup): string | undef
     if (source) return source;
   }
   return undefined;
+}
+
+export function resolutionSourceIdentity(source: string | undefined): string | undefined {
+  const parsed = parseResolutionSource(source);
+  if (!parsed.stationId) return undefined;
+  return `${parsed.provider}:${parsed.stationId.toUpperCase()}`;
+}
+
+export function resolutionSourcesMatch(
+  expected: string | undefined,
+  actual: string | undefined
+): boolean {
+  if (!expected || !actual) return false;
+  const expectedIdentity = resolutionSourceIdentity(expected);
+  const actualIdentity = resolutionSourceIdentity(actual);
+  if (expectedIdentity || actualIdentity) {
+    return expectedIdentity !== undefined && expectedIdentity === actualIdentity;
+  }
+  return expected === actual;
 }
 
 export function distanceKm(
@@ -259,7 +317,11 @@ export async function resolveStationForecastTarget(
   }
 
   if (
-    (resolution.provider !== "wunderground" && resolution.provider !== "noaa_timeseries") ||
+    (
+      resolution.provider !== "wunderground" &&
+      resolution.provider !== "noaa_timeseries" &&
+      resolution.provider !== "nws_cli"
+    ) ||
     !resolution.stationId
   ) {
     return {

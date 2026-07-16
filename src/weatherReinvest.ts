@@ -34,7 +34,11 @@ import {
   type WeatherTradeAuditReport
 } from "./weatherTradeAudit.js";
 import { parseWeatherMarketQuestion } from "./weatherMarkets.js";
-import { resolutionSourceFromText } from "./weatherStations.js";
+import {
+  normalizeWeatherCityKey,
+  resolutionSourceFromText,
+  resolutionSourcesMatch
+} from "./weatherStations.js";
 import {
   assessWeatherEntryWindow,
   assertWeatherEntryWindowMinutes,
@@ -132,6 +136,7 @@ export interface WeatherReinvestTradeResult {
   action: "sell_locked" | "buy_edge";
   status: "filled" | "submitted" | "unknown" | "quoted" | "skipped" | "failed";
   slug?: string;
+  referencePlatform?: WeatherEdgeRow["referencePlatform"];
   question?: string;
   conditionId?: string;
   outcomeIndex?: number;
@@ -168,6 +173,19 @@ export interface WeatherReinvestTradeResult {
   oppositeMarketProbability?: number;
   marketAnchorCoefficient?: number;
   entryWindow?: WeatherReinvestEntryWindowAssessment;
+  venueQuotes?: WeatherReinvestVenueQuote[];
+}
+
+export interface WeatherReinvestVenueQuote {
+  referencePlatform?: WeatherEdgeRow["referencePlatform"];
+  eventSlug: string;
+  marketSlug: string;
+  conditionId?: string;
+  status: "quoted" | "no_quote" | "rejected" | "failed";
+  quote?: WeatherReinvestQuoteDetails;
+  fairPrice?: number;
+  executableEdge?: number;
+  reason?: string;
 }
 
 export interface WeatherReinvestExecutionAttempt {
@@ -280,9 +298,38 @@ interface VistadexMarketReference {
   conditionId: string;
   description?: string;
   resolutionSource?: string;
+  referencePlatform?: WeatherEdgeRow["referencePlatform"];
+}
+
+export interface WeatherVenueRoute {
+  comparisonKey: string;
+  candidates: WeatherEdgeRow[];
+  suppressed: WeatherEdgeRow[];
+}
+
+export interface WeatherVenueQuoteCandidate<T = unknown> {
+  row: WeatherEdgeRow;
+  pricePerShare: number;
+  fairPrice: number;
+  value: T;
 }
 
 type WeatherEdgeSummary = WeatherReinvestReport["weatherEdge"];
+
+export function assertCompleteWeatherEdgeReport(
+  report: Pick<WeatherEdgeReport, "erroredGroups" | "errors">
+): void {
+  if (report.erroredGroups === 0) return;
+
+  const examples = report.errors
+    .slice(0, 3)
+    .map((error) => `${error.eventSlug}: ${error.error}`)
+    .join("; ");
+  const suffix = examples ? ` ${examples}` : "";
+  throw new Error(
+    `WeatherEdge pricing failed for ${report.erroredGroups} group(s); refusing to route against an incomplete Polymarket/Kalshi comparison.${suffix}`
+  );
+}
 
 const WEATHER_QUESTION_PATTERN = /temperature|weather|rain|snow|wind|humidity|precip/i;
 
@@ -602,11 +649,108 @@ function groupKeyFromQuestion(question?: string): string | undefined {
   if (!question) return undefined;
   const parsed = parseWeatherMarketQuestion(question);
   if (!parsed) return undefined;
-  return `${parsed.city.toLowerCase()}|${parsed.date}`;
+  return `${normalizeWeatherCityKey(parsed.city)}|${parsed.date}`;
 }
 
 function groupKeyFromRow(row: WeatherEdgeRow): string {
-  return `${row.city.toLowerCase()}|${row.date}`;
+  return `${normalizeWeatherCityKey(row.city)}|${row.date}`;
+}
+
+function comparisonBoundary(value: number | undefined): string {
+  return value === undefined ? "open" : value.toFixed(6);
+}
+
+export function weatherMarketComparisonKey(row: WeatherEdgeRow): string {
+  if (
+    !row.referencePlatform ||
+    !row.forecastStationId ||
+    !row.outcomeKind ||
+    !row.outcomeUnit
+  ) {
+    throw new Error(`Weather signal ${row.marketSlug} is missing strict venue-routing metadata.`);
+  }
+  return [
+    "station",
+    row.forecastStationId.toUpperCase(),
+    row.date,
+    row.measure,
+    row.outcomeKind,
+    row.outcomeUnit,
+    comparisonBoundary(row.lowerTempC),
+    comparisonBoundary(row.upperTempC)
+  ].join("|");
+}
+
+function projectVenueCandidate(row: WeatherEdgeRow, primary: WeatherEdgeRow): WeatherEdgeRow {
+  const yesEdge = row.yesAsk === undefined ? undefined : primary.fairYes - row.yesAsk;
+  const noEdge = row.noAsk === undefined ? undefined : primary.fairNo - row.noAsk;
+  return {
+    ...row,
+    bestSide: primary.bestSide,
+    signal: primary.signal,
+    fairYes: primary.fairYes,
+    fairNo: primary.fairNo,
+    yesEdge,
+    noEdge,
+    bestEdge: primary.bestSide === "YES" ? yesEdge : noEdge,
+    kellyFraction: primary.kellyFraction,
+    suggestedSizeUsd: primary.suggestedSizeUsd,
+    strategy: primary.strategy,
+    strategyLane: primary.strategyLane,
+    originalBestSide: primary.originalBestSide,
+    originalEdge: primary.originalEdge,
+    originalFair: primary.originalFair,
+    originalReferencePrice: primary.originalReferencePrice,
+    oppositeMarketProbability: primary.oppositeMarketProbability,
+    marketAnchorCoefficient: primary.marketAnchorCoefficient,
+    reason: `Execution alternative for ${primary.bestSide} signal selected from ${primary.referencePlatform ?? "unknown"}; live RFQ decides the venue.`
+  };
+}
+
+export function buildWeatherVenueRoutes(rows: WeatherEdgeRow[]): WeatherVenueRoute[] {
+  const grouped = new Map<string, WeatherEdgeRow[]>();
+  for (const row of rows) {
+    const key = weatherMarketComparisonKey(row);
+    const groupedRows = grouped.get(key) ?? [];
+    groupedRows.push(row);
+    grouped.set(key, groupedRows);
+  }
+
+  return [...grouped.entries()]
+    .map(([comparisonKey, rows]) => {
+      const signals = rows
+        .filter((row) => row.signal !== "SKIP")
+        .sort((a, b) => (b.bestEdge ?? -Infinity) - (a.bestEdge ?? -Infinity));
+      const primary = signals[0];
+      if (!primary) return undefined;
+      const rankedAlternatives = [primary, ...rows.filter((row) => row !== primary)];
+      const candidates = rankedAlternatives.map((row) => projectVenueCandidate(row, primary));
+      return {
+        comparisonKey,
+        candidates,
+        suppressed: signals.filter((row) =>
+          row !== primary && (
+            row.bestSide !== primary.bestSide ||
+            row.strategy !== primary.strategy ||
+            row.strategyLane !== primary.strategyLane
+          )
+        )
+      };
+    })
+    .filter((route): route is WeatherVenueRoute => route !== undefined)
+    .sort((a, b) =>
+      (b.candidates[0]?.bestEdge ?? -Infinity) - (a.candidates[0]?.bestEdge ?? -Infinity)
+    );
+}
+
+export function selectBestWeatherVenueQuote<T>(
+  candidates: WeatherVenueQuoteCandidate<T>[]
+): WeatherVenueQuoteCandidate<T> | undefined {
+  return [...candidates].sort((a, b) => {
+    const edgeDifference = (b.fairPrice - b.pricePerShare) - (a.fairPrice - a.pricePerShare);
+    if (Math.abs(edgeDifference) > 1e-12) return edgeDifference;
+    return a.pricePerShare - b.pricePerShare;
+  })[0];
 }
 
 export function requireReinvestEntryWindows(
@@ -1066,7 +1210,11 @@ async function loadVistadexEventMarkets(
   }
 ): Promise<Map<string, VistadexMarketReference>> {
   const event = await retryVistadexTransient(
-    () => getVistadexEvent(config, eventSlug),
+    async () => {
+      const candidate = await getVistadexEvent(config, eventSlug);
+      requireVistadexEventMarkets(candidate, eventSlug);
+      return candidate;
+    },
     {
       label: `Vistadex event lookup for "${eventSlug}"`,
       maxAttempts: options.maxAttempts,
@@ -1074,14 +1222,18 @@ async function loadVistadexEventMarkets(
     }
   );
   const eventRecord = (event as { event?: unknown }).event;
+  const eventReferencePlatform = eventRecord && typeof eventRecord === "object"
+    ? (eventRecord as Record<string, unknown>).reference_platform
+    : undefined;
+  const normalizedEventPlatform = eventReferencePlatform === "polymarket" || eventReferencePlatform === "kalshi"
+    ? eventReferencePlatform
+    : undefined;
   const eventDescription = eventRecord && typeof eventRecord === "object"
     ? typeof (eventRecord as Record<string, unknown>).description === "string"
       ? (eventRecord as Record<string, unknown>).description as string
       : undefined
     : undefined;
-  const markets = Array.isArray((event as { markets?: unknown }).markets)
-    ? (event as { markets: unknown[] }).markets
-    : [];
+  const markets = requireVistadexEventMarkets(event, eventSlug);
   const refs = new Map<string, VistadexMarketReference>();
   for (const item of markets) {
     if (!item || typeof item !== "object") continue;
@@ -1098,17 +1250,44 @@ async function loadVistadexEventMarkets(
     const description = typeof metadata.description === "string"
       ? metadata.description
       : eventDescription;
+    const resolutionSource = resolutionSourceFromText(
+      [typeof metadata.description === "string" ? metadata.description : undefined, eventDescription]
+        .filter(Boolean)
+        .join(" ")
+    ) ?? (typeof metadata.resolution_source === "string" ? metadata.resolution_source : undefined);
+    const sourcePlatforms: Array<NonNullable<WeatherEdgeRow["referencePlatform"]>> = Array.isArray(record.platform_sources)
+      ? record.platform_sources.flatMap((source: unknown) => {
+        if (!source || typeof source !== "object") return [];
+        const platform = (source as Record<string, unknown>).platform;
+        return platform === "polymarket" || platform === "kalshi" ? [platform] : [];
+      })
+      : [];
+    const referencePlatform = normalizedEventPlatform && sourcePlatforms.includes(normalizedEventPlatform)
+      ? normalizedEventPlatform
+      : sourcePlatforms.length === 1
+        ? sourcePlatforms[0]
+        : undefined;
     refs.set(slug, {
       slug,
       conditionId,
       question: typeof metadata.question === "string" ? metadata.question : undefined,
       description,
-      resolutionSource: typeof metadata.resolution_source === "string"
-        ? metadata.resolution_source
-        : resolutionSourceFromText(description)
+      resolutionSource,
+      referencePlatform
     });
   }
   return refs;
+}
+
+export function requireVistadexEventMarkets(event: unknown, eventSlug: string): unknown[] {
+  if (!event || typeof event !== "object" || !Array.isArray((event as { markets?: unknown }).markets)) {
+    throw new Error(`Vistadex event "${eventSlug}" returned a malformed markets payload.`);
+  }
+  const markets = (event as { markets: unknown[] }).markets;
+  if (markets.length === 0) {
+    throw new Error(`Vistadex event "${eventSlug}" is still being created: no markets are available yet.`);
+  }
+  return markets;
 }
 
 async function buyPositiveWeatherEdges(
@@ -1157,13 +1336,13 @@ async function buyPositiveWeatherEdges(
     ? { normalAgreement: 0, inverseDisagreement: 0 }
     : undefined;
 
-  for (const row of edgeReport.signals) {
+  for (const route of buildWeatherVenueRoutes(edgeReport.rows)) {
+    const row = route.candidates[0];
+    if (!row) throw new Error(`Weather venue route ${route.comparisonKey} has no executable candidates.`);
     if (bought.length >= options.maxBuys || submittedBuyAttempts >= options.maxBuys) break;
     if (availableCash < options.minTradeUsd) break;
     const side = "buy" as const;
     const outcomeIndex = row.bestSide === "YES" ? 0 : 1;
-    const fairPrice = row.bestSide === "YES" ? row.fairYes : row.fairNo;
-    const edge = row.bestEdge ?? 0;
     const groupKey = groupKeyFromRow(row);
     const entryWindow = weatherReinvestEntryWindow({
       date: row.date,
@@ -1182,35 +1361,45 @@ async function buyPositiveWeatherEdges(
       : row.strategyLane === "inverse_disagreement"
         ? "inverseDisagreement"
         : undefined;
-    const base = {
+    const baseForRow = (candidateRow: WeatherEdgeRow) => ({
       action: "buy_edge" as const,
-      slug: row.marketSlug,
-      question: row.question,
+      slug: candidateRow.marketSlug,
+      referencePlatform: candidateRow.referencePlatform,
+      question: candidateRow.question,
       outcomeIndex,
-      outcome: row.bestSide === "YES" ? "Yes" : "No",
+      outcome: candidateRow.bestSide === "YES" ? "Yes" : "No",
       side,
-      edge,
-      fairPrice,
-      confidence: row.confidence,
+      edge: candidateRow.bestEdge ?? 0,
+      fairPrice: candidateRow.bestSide === "YES" ? candidateRow.fairYes : candidateRow.fairNo,
+      confidence: candidateRow.confidence,
       groupKey,
-      modelMode: row.modelMode,
-      calibrationTargetKey: row.calibrationTargetKey,
-      calibrationSamples: row.calibrationSamples,
-      calibrationBiasC: row.calibrationBiasC,
-      calibrationTargetBiasC: row.calibrationTargetBiasC,
-      calibrationMeanAbsoluteErrorC: row.calibrationMeanAbsoluteErrorC,
-      consensusMeanC: row.consensusMeanC,
-      consensusSigmaC: row.consensusSigmaC,
-      strategy: row.strategy,
-      strategyLane: row.strategyLane,
-      originalBestSide: row.originalBestSide,
-      originalEdge: row.originalEdge,
-      originalFair: row.originalFair,
-      originalReferencePrice: row.originalReferencePrice,
-      oppositeMarketProbability: row.oppositeMarketProbability,
-      marketAnchorCoefficient: row.marketAnchorCoefficient,
+      modelMode: candidateRow.modelMode,
+      calibrationTargetKey: candidateRow.calibrationTargetKey,
+      calibrationSamples: candidateRow.calibrationSamples,
+      calibrationBiasC: candidateRow.calibrationBiasC,
+      calibrationTargetBiasC: candidateRow.calibrationTargetBiasC,
+      calibrationMeanAbsoluteErrorC: candidateRow.calibrationMeanAbsoluteErrorC,
+      consensusMeanC: candidateRow.consensusMeanC,
+      consensusSigmaC: candidateRow.consensusSigmaC,
+      strategy: candidateRow.strategy,
+      strategyLane: candidateRow.strategyLane,
+      originalBestSide: candidateRow.originalBestSide,
+      originalEdge: candidateRow.originalEdge,
+      originalFair: candidateRow.originalFair,
+      originalReferencePrice: candidateRow.originalReferencePrice,
+      oppositeMarketProbability: candidateRow.oppositeMarketProbability,
+      marketAnchorCoefficient: candidateRow.marketAnchorCoefficient,
       entryWindow
-    };
+    });
+    const base = baseForRow(row);
+
+    for (const suppressed of route.suppressed) {
+      skipped.push({
+        ...baseForRow(suppressed),
+        status: "skipped",
+        reason: `Suppressed conflicting venue signal for ${route.comparisonKey}; the stronger route selected ${row.bestSide} in lane ${row.strategyLane ?? "default"}. This venue remains eligible only as an RFQ execution alternative for the selected side.`
+      });
+    }
 
     if (!entryWindow.shouldEnter) {
       skipped.push({
@@ -1220,20 +1409,25 @@ async function buyPositiveWeatherEdges(
       });
       continue;
     }
-    if (!row.forecastTargetMatched) {
-      skipped.push({ ...base, status: "skipped", reason: "Forecast target did not match the resolution station/feed." });
-      continue;
+    const unmatchedForecast = route.candidates.find((candidate) => !candidate.forecastTargetMatched);
+    if (unmatchedForecast) {
+      throw new Error(
+        `Weather venue route ${route.comparisonKey} includes ${unmatchedForecast.referencePlatform ?? "unknown"} market ${unmatchedForecast.marketSlug} without an exact resolution station/feed match.`
+      );
     }
-    if (row.modelMode !== "historical_residuals") {
+    const uncalibrated = route.candidates.find((candidate) => candidate.modelMode !== "historical_residuals");
+    if (uncalibrated) {
+      throw new Error(
+        `Weather venue route ${route.comparisonKey} includes ${uncalibrated.referencePlatform ?? "unknown"} market ${uncalibrated.marketSlug} without calibrated historical residuals.`
+      );
+    }
+    const lowConfidence = route.candidates.find((candidate) => !confidenceAtLeast(candidate.confidence, options.minConfidence));
+    if (lowConfidence) {
       skipped.push({
-        ...base,
+        ...baseForRow(lowConfidence),
         status: "skipped",
-        reason: "WeatherEdge live reinvestment requires calibrated historical residuals; heuristic pricing is diagnostics-only."
+        reason: `Venue comparison requires every equivalent contract to meet confidence ${options.minConfidence}; ${lowConfidence.referencePlatform ?? "unknown"} is ${lowConfidence.confidence}.`
       });
-      continue;
-    }
-    if (!confidenceAtLeast(row.confidence, options.minConfidence)) {
-      skipped.push({ ...base, status: "skipped", reason: `Confidence ${row.confidence} below minimum ${options.minConfidence}.` });
       continue;
     }
     if (row.strategy === "market_informed_hybrid" && (!laneKey || !laneBudgetsUsd || !laneSpendUsd)) {
@@ -1250,7 +1444,8 @@ async function buyPositiveWeatherEdges(
       });
       continue;
     }
-    if ((row.suggestedSizeUsd ?? 0) < options.minTradeUsd) {
+    const routeSuggestedSizeUsd = Math.min(...route.candidates.map((candidate) => candidate.suggestedSizeUsd ?? 0));
+    if (routeSuggestedSizeUsd < options.minTradeUsd) {
       skipped.push({ ...base, status: "skipped", reason: "Suggested size below minimum trade size." });
       continue;
     }
@@ -1259,65 +1454,80 @@ async function buyPositiveWeatherEdges(
       continue;
     }
 
-    const priorEventFailure = eventFailures.get(row.eventSlug);
-    if (priorEventFailure) {
+    const routeReferences: Array<{ row: WeatherEdgeRow; marketRef: VistadexMarketReference }> = [];
+    let transientRouteFailure: { eventSlug: string; message: string } | undefined;
+    for (const candidateRow of route.candidates) {
+      const priorEventFailure = eventFailures.get(candidateRow.eventSlug);
+      if (priorEventFailure) {
+        transientRouteFailure = { eventSlug: candidateRow.eventSlug, message: priorEventFailure };
+        break;
+      }
+
+      let eventMarkets = eventCache.get(candidateRow.eventSlug);
+      if (!eventMarkets) {
+        try {
+          eventMarkets = await loadVistadexEventMarkets(config, candidateRow.eventSlug, {
+            maxAttempts: options.vistadexMaxAttempts,
+            retryBackoffMs: options.vistadexRetryBackoffMs
+          });
+          eventCache.set(candidateRow.eventSlug, eventMarkets);
+        } catch (error) {
+          if (!isRetryableVistadexTransientError(error)) throw error;
+          const message = error instanceof Error ? error.message : String(error);
+          eventFailures.set(candidateRow.eventSlug, message);
+          warnings.push(`${candidateRow.eventSlug}: ${message}`);
+          transientRouteFailure = { eventSlug: candidateRow.eventSlug, message };
+          break;
+        }
+      }
+
+      const marketRef = eventMarkets.get(candidateRow.marketSlug);
+      if (!marketRef) {
+        throw new Error(`Could not map ${candidateRow.referencePlatform ?? "unknown"} market ${candidateRow.marketSlug} in event ${candidateRow.eventSlug} to a Vistadex condition id.`);
+      }
+      if (!candidateRow.referencePlatform) {
+        throw new Error(`Weather signal ${candidateRow.marketSlug} is missing its reference platform.`);
+      }
+      if (!marketRef.referencePlatform) {
+        throw new Error(`Vistadex condition ${marketRef.conditionId} is missing an unambiguous reference platform.`);
+      }
+      if (candidateRow.referencePlatform !== marketRef.referencePlatform) {
+        throw new Error(`Vistadex platform mismatch for ${candidateRow.marketSlug}: ${marketRef.referencePlatform} vs signal ${candidateRow.referencePlatform}.`);
+      }
+      if (!candidateRow.resolutionSource || !marketRef.resolutionSource) {
+        throw new Error(`Resolution source missing while routing ${candidateRow.referencePlatform} market ${candidateRow.marketSlug}.`);
+      }
+      if (!resolutionSourcesMatch(candidateRow.resolutionSource, marketRef.resolutionSource)) {
+        throw new Error(`Vistadex resolution source mismatch for ${candidateRow.marketSlug}: ${marketRef.resolutionSource} vs model ${candidateRow.resolutionSource}.`);
+      }
+      routeReferences.push({ row: candidateRow, marketRef });
+    }
+
+    if (transientRouteFailure) {
       skipped.push({
         ...base,
         status: "failed",
-        reason: "Vistadex event lookup already failed for another market in this event during this run.",
-        error: priorEventFailure
+        reason: route.candidates.length > 1
+          ? `Could not compare every venue because ${transientRouteFailure.eventSlug} remained unavailable after retry; no route was traded.`
+          : "Transient Vistadex event lookup remained unavailable after retry; continuing with independent events.",
+        error: transientRouteFailure.message
       });
       continue;
     }
 
-    let eventMarkets = eventCache.get(row.eventSlug);
-    if (!eventMarkets) {
-      try {
-        eventMarkets = await loadVistadexEventMarkets(config, row.eventSlug, {
-          maxAttempts: options.vistadexMaxAttempts,
-          retryBackoffMs: options.vistadexRetryBackoffMs
-        });
-        eventCache.set(row.eventSlug, eventMarkets);
-      } catch (error) {
-        if (!isRetryableVistadexTransientError(error)) throw error;
-        const message = error instanceof Error ? error.message : String(error);
-        eventFailures.set(row.eventSlug, message);
-        warnings.push(`${row.eventSlug}: ${message}`);
-        skipped.push({
-          ...base,
-          status: "failed",
-          reason: "Transient Vistadex event lookup remained unavailable after retry; continuing with independent events.",
-          error: message
-        });
-        continue;
-      }
-    }
-    const marketRef = eventMarkets.get(row.marketSlug);
-    if (!marketRef) {
-      skipped.push({ ...base, status: "skipped", reason: "Could not map market slug to a Vistadex condition id." });
-      continue;
-    }
-    if (heldConditionIds.has(marketRef.conditionId)) {
+    const heldReference = routeReferences.find(({ marketRef }) => heldConditionIds.has(marketRef.conditionId));
+    if (heldReference) {
       skipped.push({
-        ...base,
-        conditionId: marketRef.conditionId,
+        ...baseForRow(heldReference.row),
+        conditionId: heldReference.marketRef.conditionId,
         status: "skipped",
-        reason: "Already holding this condition; skipping to avoid same-market doubling or opposite-side exposure."
-      });
-      continue;
-    }
-    if (row.resolutionSource && marketRef.resolutionSource && row.resolutionSource !== marketRef.resolutionSource) {
-      skipped.push({
-        ...base,
-        conditionId: marketRef.conditionId,
-        status: "skipped",
-        reason: `Vistadex resolution source mismatch: ${marketRef.resolutionSource} vs model ${row.resolutionSource}.`
+        reason: "Already holding an equivalent condition on one venue; skipping every route to avoid doubling or opposite-side exposure."
       });
       continue;
     }
 
     const amountLimits = [
-      row.suggestedSizeUsd ?? 0,
+      routeSuggestedSizeUsd,
       availableCash,
       groupCapacityUsd,
       laneCapacityUsd
@@ -1325,49 +1535,135 @@ async function buyPositiveWeatherEdges(
     if (options.maxPerTradeUsd !== undefined) amountLimits.push(options.maxPerTradeUsd);
     const amountUsd = Math.min(...amountLimits);
     if (amountUsd < options.minTradeUsd) {
-      skipped.push({ ...base, conditionId: marketRef.conditionId, status: "skipped", reason: "Trade size clipped below minimum." });
+      skipped.push({ ...base, status: "skipped", reason: "Trade size clipped below minimum." });
       continue;
     }
-
-    const maxAcceptablePrice = fairPrice - options.buyMinExecutableEdge;
-    if (maxAcceptablePrice <= 0) {
-      skipped.push({ ...base, conditionId: marketRef.conditionId, status: "skipped", reason: "No fair-value cushion after executable edge requirement." });
-      continue;
-    }
-    const ticket: VistadexTradeTicket = {
-      venue: "vistadex",
-      side: "buy",
-      conditionId: marketRef.conditionId,
-      outcomeIndex,
-      amountUsd: roundUsd(amountUsd),
-      limitPrice: Math.max(0.001, maxAcceptablePrice),
-      quoteTimeoutMs: options.vistadexQuoteTimeoutMs,
-      fillerTimeoutMs: options.vistadexFillerTimeoutMs
-    };
 
     let attempts: WeatherReinvestExecutionAttempt[] = [];
     let rfqId: string | undefined;
+    const venueQuotes: WeatherReinvestVenueQuote[] = [];
+    let selectedRoute: WeatherVenueQuoteCandidate<{
+      marketRef: VistadexMarketReference;
+      ticket: VistadexTradeTicket;
+      quoteResult: VistadexTradeQuote;
+      quote: WeatherReinvestQuoteDetails;
+      maxAcceptablePrice: number;
+    }> | undefined;
     try {
-      const quoteResult = await createVistadexTradeQuote(config, ticket);
-      rfqId = quoteResult.rfqId;
-      const quote = quoteDetails(quoteResult);
-      if (!quote) {
-        skipped.push({ ...base, conditionId: marketRef.conditionId, status: "skipped", amountUsd: ticket.amountUsd, rfqId, reason: "No executable buy quote." });
-        continue;
+      const viableQuotes: WeatherVenueQuoteCandidate<{
+        marketRef: VistadexMarketReference;
+        ticket: VistadexTradeTicket;
+        quoteResult: VistadexTradeQuote;
+        quote: WeatherReinvestQuoteDetails;
+        maxAcceptablePrice: number;
+      }>[] = [];
+      for (const candidate of routeReferences) {
+        const candidateFairPrice = candidate.row.bestSide === "YES" ? candidate.row.fairYes : candidate.row.fairNo;
+        const maxAcceptablePrice = candidateFairPrice - options.buyMinExecutableEdge;
+        if (maxAcceptablePrice <= 0) {
+          venueQuotes.push({
+            referencePlatform: candidate.row.referencePlatform,
+            eventSlug: candidate.row.eventSlug,
+            marketSlug: candidate.row.marketSlug,
+            conditionId: candidate.marketRef.conditionId,
+            status: "rejected",
+            fairPrice: candidateFairPrice,
+            reason: "No fair-value cushion after executable edge requirement."
+          });
+          continue;
+        }
+        const candidateTicket: VistadexTradeTicket = {
+          venue: "vistadex",
+          side: "buy",
+          conditionId: candidate.marketRef.conditionId,
+          outcomeIndex,
+          amountUsd: roundUsd(amountUsd),
+          limitPrice: Math.max(0.001, maxAcceptablePrice),
+          quoteTimeoutMs: options.vistadexQuoteTimeoutMs,
+          fillerTimeoutMs: options.vistadexFillerTimeoutMs
+        };
+        let quoteResult: VistadexTradeQuote;
+        try {
+          quoteResult = await createVistadexTradeQuote(config, candidateTicket);
+        } catch (error) {
+          venueQuotes.push({
+            referencePlatform: candidate.row.referencePlatform,
+            eventSlug: candidate.row.eventSlug,
+            marketSlug: candidate.row.marketSlug,
+            conditionId: candidate.marketRef.conditionId,
+            status: "failed",
+            fairPrice: candidateFairPrice,
+            reason: error instanceof Error ? error.message : String(error)
+          });
+          throw error;
+        }
+        const quote = quoteDetails(quoteResult);
+        if (!quote) {
+          venueQuotes.push({
+            referencePlatform: candidate.row.referencePlatform,
+            eventSlug: candidate.row.eventSlug,
+            marketSlug: candidate.row.marketSlug,
+            conditionId: candidate.marketRef.conditionId,
+            status: "no_quote",
+            fairPrice: candidateFairPrice,
+            reason: "Vistadex returned no executable quote for this reference market."
+          });
+          continue;
+        }
+        const executableEdge = candidateFairPrice - quote.pricePerShare;
+        if (quote.pricePerShare > maxAcceptablePrice) {
+          venueQuotes.push({
+            referencePlatform: candidate.row.referencePlatform,
+            eventSlug: candidate.row.eventSlug,
+            marketSlug: candidate.row.marketSlug,
+            conditionId: candidate.marketRef.conditionId,
+            status: "rejected",
+            quote,
+            fairPrice: candidateFairPrice,
+            executableEdge,
+            reason: `Buy quote ${quote.pricePerShare.toFixed(4)} above max acceptable ${maxAcceptablePrice.toFixed(4)}.`
+          });
+          continue;
+        }
+        venueQuotes.push({
+          referencePlatform: candidate.row.referencePlatform,
+          eventSlug: candidate.row.eventSlug,
+          marketSlug: candidate.row.marketSlug,
+          conditionId: candidate.marketRef.conditionId,
+          status: "quoted",
+          quote,
+          fairPrice: candidateFairPrice,
+          executableEdge
+        });
+        viableQuotes.push({
+          row: candidate.row,
+          pricePerShare: quote.pricePerShare,
+          fairPrice: candidateFairPrice,
+          value: {
+            marketRef: candidate.marketRef,
+            ticket: candidateTicket,
+            quoteResult,
+            quote,
+            maxAcceptablePrice
+          }
+        });
       }
-      if (quote.pricePerShare > maxAcceptablePrice) {
+
+      selectedRoute = selectBestWeatherVenueQuote(viableQuotes);
+      if (!selectedRoute) {
         skipped.push({
           ...base,
-          conditionId: marketRef.conditionId,
           status: "skipped",
-          amountUsd: ticket.amountUsd,
-          rfqId,
-          quote,
-          reason: `Buy quote ${quote.pricePerShare.toFixed(4)} above max acceptable ${maxAcceptablePrice.toFixed(4)}.`
+          amountUsd: roundUsd(amountUsd),
+          venueQuotes,
+          reason: "No venue returned a quote with the required executable edge."
         });
         continue;
       }
-
+      const selectedRow = selectedRoute.row;
+      const selectedBase = baseForRow(selectedRow);
+      const { marketRef, ticket, quoteResult, quote, maxAcceptablePrice } = selectedRoute.value;
+      rfqId = quoteResult.rfqId;
       ticket.limitPrice = Math.min(maxAcceptablePrice, quote.pricePerShare + options.buyQuoteDriftUsd);
       submittedBuyAttempts += 1;
       const validateBuyQuote = (candidate: VistadexTradeQuote) => {
@@ -1392,26 +1688,28 @@ async function buyPositiveWeatherEdges(
           retryBackoffMs: options.vistadexRetryBackoffMs,
           market: {
             conditionId: marketRef.conditionId,
-            slug: row.marketSlug,
-            eventSlug: row.eventSlug,
-            question: row.question,
-            outcome: row.bestSide === "YES" ? "Yes" : "No",
+            slug: selectedRow.marketSlug,
+            eventSlug: selectedRow.eventSlug,
+            question: selectedRow.question,
+            outcome: selectedRow.bestSide === "YES" ? "Yes" : "No",
             outcomeIndex
           },
           metadata: {
-            weatherStrategy: row.strategy,
-            weatherStrategyLane: row.strategyLane,
+            weatherStrategy: selectedRow.strategy,
+            weatherStrategyLane: selectedRow.strategyLane,
             weatherEntryPolicy: entryWindow.policy,
             weatherEntryLocalDate: entryWindow.localDate,
             weatherEntryLocalTime: entryWindow.localTime,
-            weatherMarketSlug: row.marketSlug,
+            weatherMarketSlug: selectedRow.marketSlug,
             weatherGroupKey: groupKey,
-            originalBestSide: row.originalBestSide,
-            originalEdge: row.originalEdge,
-            originalFair: row.originalFair,
-            originalReferencePrice: row.originalReferencePrice,
-            oppositeMarketProbability: row.oppositeMarketProbability,
-            marketAnchorCoefficient: row.marketAnchorCoefficient
+            weatherReferencePlatform: selectedRow.referencePlatform,
+            weatherVenueQuotes: venueQuotes,
+            originalBestSide: selectedRow.originalBestSide,
+            originalEdge: selectedRow.originalEdge,
+            originalFair: selectedRow.originalFair,
+            originalReferencePrice: selectedRow.originalReferencePrice,
+            oppositeMarketProbability: selectedRow.oppositeMarketProbability,
+            marketAnchorCoefficient: selectedRow.marketAnchorCoefficient
           }
         }
       );
@@ -1420,7 +1718,7 @@ async function buyPositiveWeatherEdges(
       const finalQuote = quoteDetails(finalQuoteResult) ?? quote;
       const fill = execution ? fillDetails(execution) : undefined;
       if (fill && fill.pricePerShare > maxAcceptablePrice) {
-        warnings.push(`Buy filled above max acceptable for ${row.marketSlug}: ${fill.pricePerShare} > ${maxAcceptablePrice}.`);
+        warnings.push(`Buy filled above max acceptable for ${selectedRow.marketSlug}: ${fill.pricePerShare} > ${maxAcceptablePrice}.`);
       }
       const spentUsd = fill?.totalUsd ?? finalQuote.totalUsd;
       availableCash -= spentUsd;
@@ -1428,9 +1726,9 @@ async function buyPositiveWeatherEdges(
         laneSpendUsd[laneKey] = roundUsd(laneSpendUsd[laneKey] + spentUsd);
       }
       exposure.set(groupKey, (exposure.get(groupKey) ?? 0) + spentUsd);
-      heldConditionIds.add(marketRef.conditionId);
+      for (const reference of routeReferences) heldConditionIds.add(reference.marketRef.conditionId);
       bought.push({
-        ...base,
+        ...selectedBase,
         status: execution?.status ?? "quoted",
         conditionId: marketRef.conditionId,
         amountUsd: ticket.amountUsd,
@@ -1439,17 +1737,19 @@ async function buyPositiveWeatherEdges(
         fill,
         transactionSignature: execution ? transactionSignature(execution) : undefined,
         ledger,
-        attempts
+        attempts,
+        venueQuotes
       });
     } catch (error) {
       skipped.push({
-        ...base,
-        conditionId: marketRef.conditionId,
+        ...(selectedRoute ? baseForRow(selectedRoute.row) : base),
+        conditionId: selectedRoute?.value.marketRef.conditionId,
         status: "failed",
-        amountUsd: ticket.amountUsd,
+        amountUsd: selectedRoute?.value.ticket.amountUsd ?? roundUsd(amountUsd),
         rfqId,
         attempts: (error as Error & { attempts?: WeatherReinvestExecutionAttempt[] }).attempts ?? attempts,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
+        venueQuotes
       });
     }
   }
@@ -1586,6 +1886,7 @@ export async function runWeatherReinvestment(
       marketAnchor: pricingStrategy.marketAnchor,
       hybrid: pricingStrategy.hybrid
     });
+  if (edgeReport) assertCompleteWeatherEdgeReport(edgeReport);
   const buyResult = edgeReport
     ? await buyPositiveWeatherEdges(
       config,
