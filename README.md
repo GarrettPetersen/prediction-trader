@@ -28,7 +28,7 @@ live execution difficult to trigger by accident.
 - Runs an optional scheduled Vistadex WeatherEdge reinvestment loop through
   GitHub Actions.
 - Replays the WeatherEdge loop over historical weather markets with cash,
-  positions, 0.99 sell-downs, and three-hour reinvestment cadence.
+  positions, 0.99 sell-downs, and hourly reinvestment cadence.
 - Requires explicit live-trading gates before any command can submit a trade.
 - Keeps wallet keys and API credentials out of source control.
 
@@ -574,13 +574,11 @@ not place direct orders in either a Polymarket or Kalshi account, and it does
 not need direct exchange credentials. Add `--execute` only after
 `PREDICTION_TRADER_LIVE=1` is set and the dry-run report looks sane.
 
-The GitHub Actions schedule runs at `02:15, 05:15, 08:15, 11:15, 14:15,
-17:15, 20:15, 23:15 UTC`. Open-Meteo's GFS metadata typically advances before
-ECMWF and UKMO, so the first run in each six-hour pair is timed after all three
-models normally expose the same initialization cycle; the second preserves the
-three-hour sell/redeployment cadence. Publication times can move, and GitHub
-can delay scheduled jobs, so this schedule is only an optimization. The live
-freshness gate still fails closed whenever the source metadata is not aligned.
+The GitHub Actions schedule runs hourly at minute `15`. This gives each
+station-local entry window multiple attempts when Open-Meteo publication or
+GitHub scheduling is delayed. Publication times can move, and GitHub can delay
+scheduled jobs, so the schedule is only an optimization. The live freshness
+gate still fails closed whenever GFS, ECMWF, and UKMO metadata is not aligned.
 
 `--pause-buys` leaves the sell side active, so locked weather positions can
 still be liquidated, but it skips the fresh market/forecast scan and opens no
@@ -619,9 +617,9 @@ that run at `$33.25`.
 
 ### GitHub Actions Weather Loop
 
-The repo includes `.github/workflows/weatheredge.yml`, scheduled every three
-hours at minute 15 with a `02:00 UTC` hour offset. It is dry-run by default. To
-allow live Vistadex weather trading, configure repository secrets:
+The repo includes `.github/workflows/weatheredge.yml`, scheduled hourly at
+minute 15. It is dry-run by default. To allow live Vistadex weather trading,
+configure repository secrets:
 
 ```text
 VISTADEX_CLIENT_API_KEY
@@ -731,7 +729,7 @@ hybrid strategy for reasons unrelated to its own performance.
 
 The workflow sets `TZ=America/Vancouver`, so `--days-ahead 1` means tomorrow
 from British Columbia rather than UTC. Candidate buys are still gated by the
-resolution station's own timezone: every three-hour run may sell locked
+resolution station's own timezone: every hourly run may sell locked
 positions, but it opens fresh high-temperature positions only inside
 `WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME` through
 `WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME`; normal low-temperature positions only
@@ -743,7 +741,7 @@ date. Reports label each decision with `high_day_ahead`, `low_midday`, or
 `inverse_low_late`. It
 also blocks buys until Open-Meteo metadata shows GFS, ECMWF, and UKMO on one
 usable common model cycle, and it refuses to buy if that cycle is older than
-`WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS`. This means some three-hour ticks are
+`WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS`. This means some hourly ticks are
 expected no-ops: they may be in the right station-local window but still before
 the slowest upstream model has landed. It restores and saves
 `.cache/weatheredge`, `data/weather`, and `data/trades/ledger.jsonl` with
@@ -769,7 +767,7 @@ Recommended rollout:
    risk budget you want.
 4. Set `WEATHEREDGE_LIVE=1`.
 5. Trigger one manual run with `execute=true`.
-6. Let the three-hour schedule continue only after the first live artifact and
+6. Let the hourly schedule continue only after the first live artifact and
    Vistadex activity both look right.
 
 Backtest the NOAA climatology prior for a city/date:
@@ -943,8 +941,8 @@ npm run weather:backtest:markets -- \
   --high-entry-end-local-time 23:30 \
   --low-entry-start-local-time 11:00 \
   --low-entry-end-local-time 14:30 \
-  --cron-interval-hours 3 \
-  --cron-hour-offset 2 \
+  --cron-interval-hours 1 \
+  --cron-hour-offset 0 \
   --cron-minute 15 \
   --fill-slippage 0.02 \
   --min-executable-edge 0.03
@@ -997,7 +995,7 @@ npm run weather:backtest:replay -- \
   --fetch-price-history
 ```
 
-The replay starts with cash, advances on the same three-hour cron cadence as the
+The replay starts with cash, advances on the same hourly cron cadence as the
 scheduled trader, sells open positions when their executable proxy price reaches
 `--sell-threshold`, settles resolved markets into cash, and re-sizes new buys
 with the city/date/measure portfolio optimizer. It uses the live timing rule:

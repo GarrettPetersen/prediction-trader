@@ -114,6 +114,11 @@ import {
   type WeatherBacktestTrade
 } from "./weatherBacktest.js";
 import {
+  DEFAULT_WEATHER_CRON_HOUR_OFFSET,
+  DEFAULT_WEATHER_CRON_INTERVAL_HOURS,
+  DEFAULT_WEATHER_CRON_MINUTE
+} from "./weatherCronSchedule.js";
+import {
   evaluateWeatherInverseGrid,
   type WeatherInverseModelSummary
 } from "./weatherInverseModels.js";
@@ -1813,9 +1818,9 @@ async function run(): Promise<void> {
         highEntryEndLocalMinutes: 23 * 60 + 30,
         lowEntryStartLocalMinutes: 11 * 60,
         lowEntryEndLocalMinutes: 14 * 60 + 30,
-        cronIntervalHours: 3,
-        cronHourOffset: 2,
-        cronMinute: 15,
+        cronIntervalHours: DEFAULT_WEATHER_CRON_INTERVAL_HOURS,
+        cronHourOffset: DEFAULT_WEATHER_CRON_HOUR_OFFSET,
+        cronMinute: DEFAULT_WEATHER_CRON_MINUTE,
         fillSlippage,
         minExecutableEdge,
         maxStalenessHours: 12

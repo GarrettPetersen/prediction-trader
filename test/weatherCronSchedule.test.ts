@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   DEFAULT_WEATHER_CRON_HOUR_OFFSET,
@@ -8,7 +9,7 @@ import {
 } from "../src/weatherCronSchedule.js";
 
 describe("WeatherEdge cron schedule", () => {
-  it("matches the source-aligned three-hour UTC cadence", () => {
+  it("matches the hourly UTC cadence", () => {
     const hours = Array.from({ length: 24 }, (_, hour) => hour)
       .filter((hour) => utcHourMatchesWeatherCron(
         hour,
@@ -16,7 +17,21 @@ describe("WeatherEdge cron schedule", () => {
         DEFAULT_WEATHER_CRON_HOUR_OFFSET
       ));
 
-    assert.deepEqual(hours, [2, 5, 8, 11, 14, 17, 20, 23]);
+    assert.deepEqual(hours, Array.from({ length: 24 }, (_, hour) => hour));
     assert.equal(DEFAULT_WEATHER_CRON_MINUTE, 15);
+  });
+
+  it("keeps the GitHub Actions workflow aligned with the shared defaults", () => {
+    const workflow = readFileSync(
+      new URL("../.github/workflows/weatheredge.yml", import.meta.url),
+      "utf8"
+    );
+
+    assert.match(
+      workflow,
+      new RegExp(
+        `- cron: "${DEFAULT_WEATHER_CRON_MINUTE} \\* \\* \\* \\*"`
+      )
+    );
   });
 });
