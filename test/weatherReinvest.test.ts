@@ -7,13 +7,16 @@ import {
   requireReinvestEntryWindows,
   requireReinvestPricingStrategy,
   requireVistadexEventMarkets,
-  retryVistadexTransient,
   selectBestWeatherVenueQuote,
-  vistadexRetryDelayMs,
   weatherHybridLaneBudgets,
   weatherReinvestEntryWindow,
   weatherReinvestExecutionFailures
 } from "../src/weatherReinvest.js";
+import {
+  isRetryableNetworkError,
+  retryDelayMs,
+  retryTransient
+} from "../src/retry.js";
 import type { WeatherEdgeRow } from "../src/weatherEdges.js";
 
 function venueRow(overrides: Partial<WeatherEdgeRow> = {}): WeatherEdgeRow {
@@ -306,43 +309,59 @@ describe("WeatherEdge Vistadex execution retry helpers", () => {
     assert.equal(isRetryableVistadexTransientError(new Error('Event "highest-temperature-in-lucknow-on-july-16-2026" is still being created')), true);
   });
 
+  it("recognizes transient source failures without treating validation as retryable", () => {
+    assert.equal(isRetryableNetworkError(new Error("fetch failed")), true);
+    assert.equal(isRetryableNetworkError(new Error("Request failed 503 Service Unavailable")), true);
+    assert.equal(isRetryableNetworkError(new Error("Polymarket Gamma request failed with HTTP 503")), true);
+    assert.equal(
+      isRetryableNetworkError(new Error("Weather pricing failed", { cause: new Error("ECONNRESET") })),
+      true
+    );
+    assert.equal(isRetryableNetworkError(new Error("Resolution station mismatch")), false);
+  });
+
   it("does not retry deterministic trade validation failures", () => {
     assert.equal(isRetryableVistadexTransientError(new Error("Retry buy quote 0.9000 above max acceptable 0.8000.")), false);
     assert.equal(isRetryableVistadexTransientError(new Error("Vistadex buy requires amountUsd.")), false);
   });
 
   it("uses exponential retry backoff", () => {
-    assert.equal(vistadexRetryDelayMs(10_000, 1), 10_000);
-    assert.equal(vistadexRetryDelayMs(10_000, 2), 20_000);
-    assert.equal(vistadexRetryDelayMs(10_000, 3), 40_000);
+    assert.equal(retryDelayMs(10_000, 1), 10_000);
+    assert.equal(retryDelayMs(10_000, 2), 20_000);
+    assert.equal(retryDelayMs(10_000, 3), 40_000);
   });
 
   it("retries a transient Vistadex operation once and returns its result", async () => {
     let calls = 0;
-    const result = await retryVistadexTransient(async () => {
+    const notices: string[] = [];
+    const result = await retryTransient(async () => {
       calls += 1;
       if (calls === 1) throw new Error('Event "lucknow" is still being created');
       return "ready";
     }, {
       label: "Lucknow event lookup",
       maxAttempts: 2,
-      retryBackoffMs: 0
+      retryBackoffMs: 0,
+      isRetryable: isRetryableVistadexTransientError,
+      onRetry: (notice) => notices.push(`${notice.label}:${notice.attempt}`)
     });
 
     assert.equal(result, "ready");
     assert.equal(calls, 2);
+    assert.deepEqual(notices, ["Lucknow event lookup:1"]);
   });
 
   it("reports an exhausted transient Vistadex operation with context", async () => {
     let calls = 0;
     await assert.rejects(
-      retryVistadexTransient(async () => {
+      retryTransient(async () => {
         calls += 1;
         throw new Error('Event "lucknow" is still being created');
       }, {
         label: "Lucknow event lookup",
         maxAttempts: 2,
-        retryBackoffMs: 0
+        retryBackoffMs: 0,
+        isRetryable: isRetryableVistadexTransientError
       }),
       /Lucknow event lookup failed after 2 attempts: Event "lucknow" is still being created/
     );
@@ -352,13 +371,14 @@ describe("WeatherEdge Vistadex execution retry helpers", () => {
   it("does not retry a non-transient Vistadex operation failure", async () => {
     let calls = 0;
     await assert.rejects(
-      retryVistadexTransient(async () => {
+      retryTransient(async () => {
         calls += 1;
         throw new Error("Vistadex authentication failed");
       }, {
         label: "event lookup",
         maxAttempts: 2,
-        retryBackoffMs: 0
+        retryBackoffMs: 0,
+        isRetryable: isRetryableVistadexTransientError
       }),
       /Vistadex authentication failed/
     );

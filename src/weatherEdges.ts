@@ -17,6 +17,14 @@ import {
   type WeatherTradingWindowAssessment
 } from "./weatherTradingWindow.js";
 import type { ParsedResolutionSource } from "./weatherStations.js";
+import {
+  isRetryableNetworkError,
+  retryTransient,
+  type RetryNotice
+} from "./retry.js";
+
+const DEFAULT_SOURCE_FETCH_ATTEMPTS = 2;
+const DEFAULT_SOURCE_RETRY_BACKOFF_MS = 5_000;
 
 export interface WeatherEdgeReportOptions extends WeatherPricingOptions {
   date?: string;
@@ -34,6 +42,8 @@ export interface WeatherEdgeReportOptions extends WeatherPricingOptions {
   sizingStrategy?: WeatherPricingOptions["sizingStrategy"];
   maxGroupFraction?: number;
   portfolioStepUsd?: number;
+  sourceFetchMaxAttempts?: number;
+  sourceRetryBackoffMs?: number;
 }
 
 export interface WeatherEdgeRow {
@@ -107,6 +117,7 @@ export interface WeatherEdgeReport {
   marketCount: number;
   rowCount: number;
   signalCount: number;
+  sourceRetries: RetryNotice[];
   groups: WeatherPricingReport[];
   rows: WeatherEdgeRow[];
   signals: WeatherEdgeRow[];
@@ -284,13 +295,32 @@ export async function computeWeatherEdgeReport(
   config: AppConfig,
   options: WeatherEdgeReportOptions = {}
 ): Promise<WeatherEdgeReport> {
-  const targetDate = options.date ?? localIsoDateDaysFrom(new Date(), options.daysAhead ?? 1);
-  const groups = await fetchWeatherMarkets(config, {
-    date: targetDate,
-    limit: options.limit ?? 100,
-    maxPages: options.maxPages ?? 20,
-    includeExpired: options.includeExpired
+  const sourceFetchMaxAttempts = options.sourceFetchMaxAttempts ?? DEFAULT_SOURCE_FETCH_ATTEMPTS;
+  const sourceRetryBackoffMs = options.sourceRetryBackoffMs ?? DEFAULT_SOURCE_RETRY_BACKOFF_MS;
+  if (!Number.isInteger(sourceFetchMaxAttempts) || sourceFetchMaxAttempts < 1) {
+    throw new Error("Weather source fetch max attempts must be a positive integer.");
+  }
+  if (!Number.isFinite(sourceRetryBackoffMs) || sourceRetryBackoffMs < 0) {
+    throw new Error("Weather source retry backoff must be a non-negative number.");
+  }
+  const sourceRetries: RetryNotice[] = [];
+  const retryOptions = (label: string) => ({
+    label,
+    maxAttempts: sourceFetchMaxAttempts,
+    retryBackoffMs: sourceRetryBackoffMs,
+    isRetryable: isRetryableNetworkError,
+    onRetry: (notice: RetryNotice) => sourceRetries.push(notice)
   });
+  const targetDate = options.date ?? localIsoDateDaysFrom(new Date(), options.daysAhead ?? 1);
+  const groups = await retryTransient(
+    () => fetchWeatherMarkets(config, {
+      date: targetDate,
+      limit: options.limit ?? 100,
+      maxPages: options.maxPages ?? 20,
+      includeExpired: options.includeExpired
+    }),
+    retryOptions(`Weather market discovery for ${targetDate}`)
+  );
   const targetGroups = filterWeatherGroupsForDate(groups, targetDate);
   const maxEvents = options.maxEvents === undefined
     ? targetGroups.length
@@ -302,7 +332,10 @@ export async function computeWeatherEdgeReport(
     options.concurrency ?? 2,
     async (group) => {
       try {
-        return await priceWeatherMarketGroup(config, group, pricingOptions(options));
+        return await retryTransient(
+          () => priceWeatherMarketGroup(config, group, pricingOptions(options)),
+          retryOptions(`Weather pricing for ${group.eventSlug}`)
+        );
       } catch (error) {
         errors.push({
           eventSlug: group.eventSlug,
@@ -336,6 +369,7 @@ export async function computeWeatherEdgeReport(
     marketCount: reports.reduce((sum, report) => sum + report.group.marketCount, 0),
     rowCount: rows.length,
     signalCount: signals.length,
+    sourceRetries,
     groups: reports,
     rows,
     signals,

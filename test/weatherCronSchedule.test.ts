@@ -21,7 +21,7 @@ describe("WeatherEdge cron schedule", () => {
     assert.equal(DEFAULT_WEATHER_CRON_MINUTE, 15);
   });
 
-  it("keeps the GitHub Actions workflow aligned with the shared defaults", () => {
+  it("keeps the primary workflow tick aligned and adds a recovery tick", () => {
     const workflow = readFileSync(
       new URL("../.github/workflows/weatheredge.yml", import.meta.url),
       "utf8"
@@ -30,8 +30,10 @@ describe("WeatherEdge cron schedule", () => {
     assert.match(
       workflow,
       new RegExp(
-        `- cron: "${DEFAULT_WEATHER_CRON_MINUTE} \\* \\* \\* \\*"`
+        `- cron: "${DEFAULT_WEATHER_CRON_MINUTE},45 \\* \\* \\* \\*"`
       )
     );
+    assert.match(workflow, /WEATHEREDGE_SOURCE_FETCH_MAX_ATTEMPTS:.*'2'/);
+    assert.match(workflow, /--source-fetch-max-attempts \$\{WEATHEREDGE_SOURCE_FETCH_MAX_ATTEMPTS\}/);
   });
 });

@@ -574,11 +574,12 @@ not place direct orders in either a Polymarket or Kalshi account, and it does
 not need direct exchange credentials. Add `--execute` only after
 `PREDICTION_TRADER_LIVE=1` is set and the dry-run report looks sane.
 
-The GitHub Actions schedule runs hourly at minute `15`. This gives each
-station-local entry window multiple attempts when Open-Meteo publication or
-GitHub scheduling is delayed. Publication times can move, and GitHub can delay
-scheduled jobs, so the schedule is only an optimization. The live freshness
-gate still fails closed whenever GFS, ECMWF, and UKMO metadata is not aligned.
+The GitHub Actions schedule requests runs at minutes `15` and `45` of every
+hour. GitHub can delay or omit scheduled deliveries, so the second tick gives
+each station-local entry window another chance without relaxing any trading
+rule. Publication times can move, so the schedule is only an optimization. The
+live freshness gate still fails closed whenever GFS, ECMWF, and UKMO metadata
+is not aligned.
 
 `--pause-buys` leaves the sell side active, so locked weather positions can
 still be liquidated, but it skips the fresh market/forecast scan and opens no
@@ -617,9 +618,9 @@ that run at `$33.25`.
 
 ### GitHub Actions Weather Loop
 
-The repo includes `.github/workflows/weatheredge.yml`, scheduled hourly at
-minute 15. It is dry-run by default. To allow live Vistadex weather trading,
-configure repository secrets:
+The repo includes `.github/workflows/weatheredge.yml`, scheduled twice hourly
+at minutes 15 and 45. It is dry-run by default. To allow live Vistadex weather
+trading, configure repository secrets:
 
 ```text
 VISTADEX_CLIENT_API_KEY
@@ -664,6 +665,8 @@ WEATHEREDGE_LOW_ENTRY_END_LOCAL_TIME=14:30
 WEATHEREDGE_INVERSE_LOW_ENTRY_START_LOCAL_TIME=20:00
 WEATHEREDGE_INVERSE_LOW_ENTRY_END_LOCAL_TIME=23:30
 WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS=12
+WEATHEREDGE_SOURCE_FETCH_MAX_ATTEMPTS=2
+WEATHEREDGE_SOURCE_RETRY_BACKOFF_MS=5000
 WEATHEREDGE_CALIBRATION_HALF_LIFE_DAYS=
 WEATHEREDGE_CITY_BIAS_PRIOR_WEIGHT=
 PREDICTION_TRADER_MAX_USD=1000
@@ -722,6 +725,14 @@ reported as a failed decision and the run continues with independent events.
 Authentication, response-shape, and other non-transient failures still stop the
 run; no substitute event data or pricing model is used.
 
+Account-state reads use the same bounded Vistadex retry policy. Weather market
+discovery, Open-Meteo freshness metadata, and each station-aligned pricing
+request use `WEATHEREDGE_SOURCE_FETCH_MAX_ATTEMPTS` and
+`WEATHEREDGE_SOURCE_RETRY_BACKOFF_MS`. Production uses two total attempts: one
+initial request and one retry. Retryable network failures are recorded in the
+run report. If the retry also fails, the full comparison still fails closed;
+the bot never substitutes stale, partial, or heuristic data.
+
 `WEATHEREDGE_PAUSE_BUYS=true` leaves locked-position sales active but opens no
 new weather positions. The recent-audit gate should remain disabled until it is
 made strategy-lane-aware; otherwise older forecast-edge trades can block the
@@ -729,7 +740,7 @@ hybrid strategy for reasons unrelated to its own performance.
 
 The workflow sets `TZ=America/Vancouver`, so `--days-ahead 1` means tomorrow
 from British Columbia rather than UTC. Candidate buys are still gated by the
-resolution station's own timezone: every hourly run may sell locked
+resolution station's own timezone: every scheduled run may sell locked
 positions, but it opens fresh high-temperature positions only inside
 `WEATHEREDGE_HIGH_ENTRY_START_LOCAL_TIME` through
 `WEATHEREDGE_HIGH_ENTRY_END_LOCAL_TIME`; normal low-temperature positions only
@@ -741,7 +752,7 @@ date. Reports label each decision with `high_day_ahead`, `low_midday`, or
 `inverse_low_late`. It
 also blocks buys until Open-Meteo metadata shows GFS, ECMWF, and UKMO on one
 usable common model cycle, and it refuses to buy if that cycle is older than
-`WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS`. This means some hourly ticks are
+`WEATHEREDGE_MAX_MODEL_RUN_AGE_HOURS`. This means some scheduled ticks are
 expected no-ops: they may be in the right station-local window but still before
 the slowest upstream model has landed. It restores and saves
 `.cache/weatheredge`, `data/weather`, and `data/trades/ledger.jsonl` with
@@ -767,7 +778,7 @@ Recommended rollout:
    risk budget you want.
 4. Set `WEATHEREDGE_LIVE=1`.
 5. Trigger one manual run with `execute=true`.
-6. Let the hourly schedule continue only after the first live artifact and
+6. Let the scheduled cadence continue only after the first live artifact and
    Vistadex activity both look right.
 
 Backtest the NOAA climatology prior for a city/date:

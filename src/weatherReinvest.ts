@@ -52,6 +52,13 @@ import {
   fetchOpenMeteoForecastFreshness,
   type WeatherForecastFreshnessAssessment
 } from "./weatherForecastFreshness.js";
+import {
+  errorMessageChain,
+  isRetryableNetworkError,
+  retryDelayMs,
+  retryTransient,
+  type RetryNotice
+} from "./retry.js";
 import type {
   WeatherHybridPricingOptions,
   WeatherMarketAnchorPricingOptions,
@@ -64,6 +71,8 @@ const DEFAULT_VISTADEX_QUOTE_TIMEOUT_MS = 90_000;
 const DEFAULT_VISTADEX_FILLER_TIMEOUT_MS = 120_000;
 const DEFAULT_VISTADEX_EXECUTION_ATTEMPTS = 2;
 const DEFAULT_VISTADEX_RETRY_BACKOFF_MS = 10_000;
+const DEFAULT_SOURCE_FETCH_ATTEMPTS = 2;
+const DEFAULT_SOURCE_RETRY_BACKOFF_MS = 5_000;
 
 export interface WeatherReinvestOptions extends Pick<
   WeatherEdgeReportOptions,
@@ -122,6 +131,8 @@ export interface WeatherReinvestOptions extends Pick<
   vistadexFillerTimeoutMs?: number;
   vistadexMaxAttempts?: number;
   vistadexRetryBackoffMs?: number;
+  sourceFetchMaxAttempts?: number;
+  sourceRetryBackoffMs?: number;
   now?: Date;
 }
 
@@ -224,10 +235,16 @@ export interface WeatherReinvestReport {
     fillerTimeoutMs: number;
     maxAttempts: number;
     retryBackoffMs: number;
+    retries: RetryNotice[];
+  };
+  sourceFetch: {
+    maxAttempts: number;
+    retryBackoffMs: number;
+    retries: RetryNotice[];
   };
   weatherEdge: Pick<
     WeatherEdgeReport,
-    "scannedGroups" | "targetGroups" | "pricedGroups" | "timeSkippedGroups" | "erroredGroups" | "marketCount" | "rowCount" | "signalCount" | "errors"
+    "scannedGroups" | "targetGroups" | "pricedGroups" | "timeSkippedGroups" | "erroredGroups" | "marketCount" | "rowCount" | "signalCount" | "sourceRetries" | "errors"
   >;
   sold: WeatherReinvestTradeResult[];
   bought: WeatherReinvestTradeResult[];
@@ -369,59 +386,9 @@ function sleep(ms: number): Promise<void> {
 }
 
 export function isRetryableVistadexTransientError(error: unknown): boolean {
-  const messages: string[] = [];
-  let current: unknown = error;
-  const visited = new Set<unknown>();
-  while (current !== undefined && current !== null && !visited.has(current)) {
-    visited.add(current);
-    messages.push(current instanceof Error ? current.message : String(current));
-    current = current instanceof Error ? current.cause : undefined;
-  }
-  return /still being created|timed out waiting for filler action|timed out waiting for rfq websocket subscription|websocket closed while waiting for filler action|websocket closed while waiting for auction result|fetch failed|network|socket|econnreset|etimedout|eai_again/i.test(messages.join("\n"));
-}
-
-export function vistadexRetryDelayMs(baseDelayMs: number, attempt: number): number {
-  if (!Number.isFinite(baseDelayMs) || baseDelayMs < 0) {
-    throw new Error("Vistadex retry backoff must be a non-negative number.");
-  }
-  if (!Number.isFinite(attempt) || attempt < 1) {
-    throw new Error("Vistadex retry attempt must be a positive number.");
-  }
-  return Math.round(baseDelayMs * (2 ** Math.max(0, Math.trunc(attempt) - 1)));
-}
-
-export async function retryVistadexTransient<T>(
-  operation: () => Promise<T>,
-  options: {
-    label: string;
-    maxAttempts: number;
-    retryBackoffMs: number;
-  }
-): Promise<T> {
-  if (!Number.isInteger(options.maxAttempts) || options.maxAttempts < 1) {
-    throw new Error("Vistadex retry max attempts must be a positive integer.");
-  }
-  if (!Number.isFinite(options.retryBackoffMs) || options.retryBackoffMs < 0) {
-    throw new Error("Vistadex retry backoff must be a non-negative number.");
-  }
-
-  for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      if (!isRetryableVistadexTransientError(error)) throw error;
-      if (attempt === options.maxAttempts) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(
-          `${options.label} failed after ${options.maxAttempts} attempts: ${message}`,
-          { cause: error }
-        );
-      }
-      await sleep(vistadexRetryDelayMs(options.retryBackoffMs, attempt));
-    }
-  }
-
-  throw new Error(`${options.label} retry loop ended without a result.`);
+  return isRetryableNetworkError(error) ||
+    /still being created|timed out waiting for filler action|timed out waiting for rfq websocket subscription|websocket closed while waiting for filler action|websocket closed while waiting for auction result/i
+      .test(errorMessageChain(error).join("\n"));
 }
 
 export function deployableWeatherCash(cashUsd: number, targetCashReserveUsd = 0): number {
@@ -858,6 +825,7 @@ function emptyWeatherEdgeSummary(): WeatherEdgeSummary {
     marketCount: 0,
     rowCount: 0,
     signalCount: 0,
+    sourceRetries: [],
     errors: []
   };
 }
@@ -978,6 +946,24 @@ async function loadVistadexState(config: AppConfig): Promise<{
   };
 }
 
+async function loadVistadexStateWithRetry(
+  config: AppConfig,
+  options: {
+    label: string;
+    maxAttempts: number;
+    retryBackoffMs: number;
+    onRetry: (notice: RetryNotice) => void;
+  }
+): ReturnType<typeof loadVistadexState> {
+  return retryTransient(
+    () => loadVistadexState(config),
+    {
+      ...options,
+      isRetryable: isRetryableVistadexTransientError
+    }
+  );
+}
+
 async function maybeExecuteVistadexTrade(
   config: AppConfig,
   ledgerPath: string,
@@ -1039,7 +1025,7 @@ async function maybeExecuteVistadexTrade(
       lastError = error;
       const retryable = isRetryableVistadexTransientError(error);
       const shouldRetry = retryable && attempt < options.maxAttempts;
-      const nextDelayMs = shouldRetry ? vistadexRetryDelayMs(options.retryBackoffMs, attempt) : undefined;
+      const nextDelayMs = shouldRetry ? retryDelayMs(options.retryBackoffMs, attempt) : undefined;
       attempts.push({
         attempt,
         maxAttempts: options.maxAttempts,
@@ -1209,7 +1195,7 @@ async function loadVistadexEventMarkets(
     retryBackoffMs: number;
   }
 ): Promise<Map<string, VistadexMarketReference>> {
-  const event = await retryVistadexTransient(
+  const event = await retryTransient(
     async () => {
       const candidate = await getVistadexEvent(config, eventSlug);
       requireVistadexEventMarkets(candidate, eventSlug);
@@ -1218,7 +1204,8 @@ async function loadVistadexEventMarkets(
     {
       label: `Vistadex event lookup for "${eventSlug}"`,
       maxAttempts: options.maxAttempts,
-      retryBackoffMs: options.retryBackoffMs
+      retryBackoffMs: options.retryBackoffMs,
+      isRetryable: isRetryableVistadexTransientError
     }
   );
   const eventRecord = (event as { event?: unknown }).event;
@@ -1772,11 +1759,19 @@ export async function runWeatherReinvestment(
   }
   const ledgerPath = options.ledgerPath ?? config.ledger.path;
   const execute = options.execute === true;
+  const vistadexRetries: RetryNotice[] = [];
   const vistadexExecution = {
     quoteTimeoutMs: positiveInteger(options.vistadexQuoteTimeoutMs, DEFAULT_VISTADEX_QUOTE_TIMEOUT_MS, "Vistadex quote timeout"),
     fillerTimeoutMs: positiveInteger(options.vistadexFillerTimeoutMs, DEFAULT_VISTADEX_FILLER_TIMEOUT_MS, "Vistadex filler timeout"),
     maxAttempts: positiveInteger(options.vistadexMaxAttempts, DEFAULT_VISTADEX_EXECUTION_ATTEMPTS, "Vistadex max attempts"),
-    retryBackoffMs: nonNegativeFinite(options.vistadexRetryBackoffMs, DEFAULT_VISTADEX_RETRY_BACKOFF_MS, "Vistadex retry backoff")
+    retryBackoffMs: nonNegativeFinite(options.vistadexRetryBackoffMs, DEFAULT_VISTADEX_RETRY_BACKOFF_MS, "Vistadex retry backoff"),
+    retries: vistadexRetries
+  };
+  const sourceRetries: RetryNotice[] = [];
+  const sourceFetch = {
+    maxAttempts: positiveInteger(options.sourceFetchMaxAttempts, DEFAULT_SOURCE_FETCH_ATTEMPTS, "Weather source fetch max attempts"),
+    retryBackoffMs: nonNegativeFinite(options.sourceRetryBackoffMs, DEFAULT_SOURCE_RETRY_BACKOFF_MS, "Weather source retry backoff"),
+    retries: sourceRetries
   };
   const sellOptions = {
     execute,
@@ -1807,7 +1802,12 @@ export async function runWeatherReinvestment(
     now: options.now
   };
 
-  const initialState = await loadVistadexState(config);
+  const initialState = await loadVistadexStateWithRetry(config, {
+    label: "Initial Vistadex account state",
+    maxAttempts: vistadexExecution.maxAttempts,
+    retryBackoffMs: vistadexExecution.retryBackoffMs,
+    onRetry: (notice) => vistadexRetries.push(notice)
+  });
   const sellResult = await sellLockedWeatherPositions(
     config,
     ledgerPath,
@@ -1815,7 +1815,12 @@ export async function runWeatherReinvestment(
     sellOptions
   );
   const observedAfterSellState = execute && sellResult.sold.some(tradeMayHaveMutatedState)
-    ? await loadVistadexState(config)
+    ? await loadVistadexStateWithRetry(config, {
+      label: "Post-sell Vistadex account state",
+      maxAttempts: vistadexExecution.maxAttempts,
+      retryBackoffMs: vistadexExecution.retryBackoffMs,
+      onRetry: (notice) => vistadexRetries.push(notice)
+    })
     : initialState;
   const sellProceedsUsd = expectedSellProceedsUsd(sellResult.sold, execute);
   const fillImpliedPostSellCashUsd = roundUsd(initialState.cashUsd + sellProceedsUsd);
@@ -1851,10 +1856,19 @@ export async function runWeatherReinvestment(
   const maxModelRunAgeHours = requirePositiveModelRunAgeHours(options.maxModelRunAgeHours);
   const forecastFreshness = pauseBuys || skippedForCash || skippedForAuditGate
     ? undefined
-    : await fetchOpenMeteoForecastFreshness(config, {
-      now: options.now,
-      maxRunAgeHours: maxModelRunAgeHours
-    });
+    : await retryTransient(
+      () => fetchOpenMeteoForecastFreshness(config, {
+        now: options.now,
+        maxRunAgeHours: maxModelRunAgeHours
+      }),
+      {
+        label: "Open-Meteo forecast freshness metadata",
+        maxAttempts: sourceFetch.maxAttempts,
+        retryBackoffMs: sourceFetch.retryBackoffMs,
+        isRetryable: isRetryableNetworkError,
+        onRetry: (notice) => sourceRetries.push(notice)
+      }
+    );
   const skippedForForecastFreshness = forecastFreshness !== undefined && !forecastFreshness.ok;
   const skippedBeforeScan = pauseBuys || skippedForCash || skippedForAuditGate || skippedForForecastFreshness;
   const edgeReport = skippedBeforeScan
@@ -1884,9 +1898,12 @@ export async function runWeatherReinvestment(
       sizingStrategy: "city_portfolio",
       strategy: pricingStrategy.strategy,
       marketAnchor: pricingStrategy.marketAnchor,
-      hybrid: pricingStrategy.hybrid
+      hybrid: pricingStrategy.hybrid,
+      sourceFetchMaxAttempts: sourceFetch.maxAttempts,
+      sourceRetryBackoffMs: sourceFetch.retryBackoffMs
     });
   if (edgeReport) assertCompleteWeatherEdgeReport(edgeReport);
+  if (edgeReport) sourceRetries.push(...edgeReport.sourceRetries);
   const buyResult = edgeReport
     ? await buyPositiveWeatherEdges(
       config,
@@ -1918,7 +1935,12 @@ export async function runWeatherReinvestment(
     sellResult.sold.some(tradeMayHaveMutatedState) ||
     buyResult.bought.some(tradeMayHaveMutatedState)
   )
-    ? await loadVistadexState(config)
+    ? await loadVistadexStateWithRetry(config, {
+      label: "Final Vistadex account state",
+      maxAttempts: vistadexExecution.maxAttempts,
+      retryBackoffMs: vistadexExecution.retryBackoffMs,
+      onRetry: (notice) => vistadexRetries.push(notice)
+    })
     : afterSellState;
   const buySpendUsd = expectedBuySpendUsd(buyResult.bought, execute);
   const fillImpliedFinalCashUsd = roundUsd(Math.max(0, afterSellState.cashUsd - buySpendUsd));
@@ -1955,6 +1977,7 @@ export async function runWeatherReinvestment(
     targetDate: edgeReport?.targetDate ?? targetDate,
     entryWindows,
     vistadexExecution,
+    sourceFetch,
     weatherEdge: edgeReport
       ? {
         scannedGroups: edgeReport.scannedGroups,
@@ -1965,6 +1988,7 @@ export async function runWeatherReinvestment(
         marketCount: edgeReport.marketCount,
         rowCount: edgeReport.rowCount,
         signalCount: edgeReport.signalCount,
+        sourceRetries: edgeReport.sourceRetries,
         errors: edgeReport.errors
       }
       : emptyWeatherEdgeSummary(),
